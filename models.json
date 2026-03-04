@@ -5,10 +5,7 @@
     "channels": ["B04", "B03", "B02", "B08"],
     "tile": 256,
     "bound": 32,
-    "threshold": 0.6,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
+    "threshold": 0.9,
     "preprocess": "sentinel",
     "inputs": 1
   },
@@ -19,9 +16,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.6,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 1
   },
@@ -32,9 +26,6 @@
     "tile": 512,
     "bound": 64,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 1
   },
@@ -45,9 +36,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.1,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 1
   },
@@ -58,9 +46,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.8,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 1
   },
@@ -71,9 +56,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 2
   },
@@ -84,9 +66,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 2
   },
@@ -97,9 +76,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 2
   },
@@ -110,9 +86,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 2
   },
@@ -123,9 +96,6 @@
     "tile": 448,
     "bound": 32,
     "threshold": 0.5,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 2
   },
@@ -136,23 +106,29 @@
     "tile": 512,
     "bound": 0,
     "threshold": 0.4,
-    "divisor": 10000,
-    "out_channels": 1,
-    "mode": "binary",
     "preprocess": "sentinel",
     "inputs": 1
   },
-  "forest_dis": {
-    "description": "Границы усыхания лесной растительности",
-    "onnx_file": "forest_disease.onnx",
+  "forest_insects": {
+    "description": "Усыхание леса: насекомые-вредители",
+    "onnx_file": "forest_insects.onnx",
     "channels": ["B01", "B03", "B05", "B06", "B11"],
     "tile": 256,
-    "bound": 0,
-    "threshold": 0.4,
-    "divisor": 1,
-    "out_channels": 5,
-    "mode": "argmax",
-    "preprocess": "none",
-    "inputs": 1
+    "bound": 32,
+    "threshold": 0.9,
+    "preprocess": "sentinel",
+    "inputs": 1,
+    "min_area": 10000.0
+  },
+  "forest_fungi": {
+    "description": "Усыхание леса: грибные заболевания",
+    "onnx_file": "forest_fungi.onnx",
+    "channels": ["B01", "B03", "B05", "B06", "B11"],
+    "tile": 256,
+    "bound": 32,
+    "threshold": 0.9,
+    "preprocess": "sentinel",
+    "inputs": 1,
+    "min_area": 10000.0
   }
 }

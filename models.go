@@ -16,14 +16,12 @@ type ModelSpec struct {
     Tile        int      `json:"tile"`         // размер тайла (в пикселях)
     Bound       int      `json:"bound"`        // отступ, который не записываем по краям тайла
     Threshold   float32  `json:"threshold"`    // порог бинаризации
-    Divisor     float32  `json:"divisor"`      // делитель для нормализации
-    OutChannels int      `json:"out_channels"` // число каналов на выходе модели
-    Mode        string   `json:"mode"`         // "binary" или "argmax"
-    Preprocess  string   `json:"preprocess"`   // "sentinel", "rgb", "ndvog"
-
-    // Новое:
-    Inputs int `json:"inputs,omitempty"` // число ожидаемых GeoTIFF-входов: 1 (по умолчанию) или 2 для моделей "до/после" (windfall)
+    Divisor     float32  `json:"-"`            // делитель для нормализации
+    Preprocess  string   `json:"preprocess"`   // тип предобработки входа, сейчас используем только "sentinel"
+    Inputs      int      `json:"inputs,omitempty"`   // число ожидаемых GeoTIFF-входов: 1 (по умолчанию) или 2 для моделей "до/после" (windfall)
+    Simplify    float64  `json:"simplify,omitempty"` // степень упрощения геометрии по умолчанию; 0 — без упрощения
 }
+
 
 // activeModelSpecs — текущий набор моделей, загруженный из внешнего файла.
 var activeModelSpecs = map[string]ModelSpec{}

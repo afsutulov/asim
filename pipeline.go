@@ -25,31 +25,20 @@ func preprocess(v float32, divisor float32) float32 {
 }
 
 // preprocessBySpec применяет предобработку в зависимости от модели.
-// - "ndvog": индекс уже в [0..1], нормализуем как в forest_disease.py: (x-0.5)/0.5
-// - "none"/"raw": без нормализации (используем исходные значения пикселей)
-// - всё остальное (включая "sentinel", "rgb"): делим на Divisor и режем в [0,1]
+// Сейчас поддерживаем только вариант, эквивалентный sentinel-препроцессингу:
+// делим на Divisor и обрезаем значения в диапазоне [0,1].
 func preprocessBySpec(v float32, spec ModelSpec) float32 {
-    switch spec.Preprocess {
-    case "ndvog":
-	// для индексов типа NDVOG, которые уже в [0..1]
-	return (v - 0.5) / 0.5
-    case "none", "raw":
-	// без нормализации: как в forest_disease_v3.process,
-	// где raster_data подаётся в сеть напрямую
-	return v
-    default:
-	// sentinel/rgb (по умолчанию): делим на divisor и режем в [0..1]
 	return preprocess(v, spec.Divisor)
-    }
 }
+
 
 // RunModel выполняет полный пайплайн:
 // 1) читает 9-канальный Sentinel GeoTIFF
 // 2) выбирает нужные каналы под модель
 // 3) режет изображение на тайлы, прогоняет ONNX модель батчами
 // 4) собирает итоговую бинарную маску (0/1)
-// 5) сохраняет либо GeoTIFF, либо SHP (через polygonize)
-func RunModel(inTif, onnxModel, outPath string, batchSize int, device string, cudaDeviceID int, format string, minArea float64, simplify float64, spec ModelSpec) error {
+// 5) сохраняет результат в виде SHP (через polygonize по временной маске GeoTIFF)
+func RunModel(inTif, onnxModel, outPath string, batchSize int, device string, cudaDeviceID int, minArea float64, simplify float64, spec ModelSpec) error {
     if batchSize < 1 {
 	batchSize = 1
     }
@@ -104,73 +93,52 @@ func RunModel(inTif, onnxModel, outPath string, batchSize int, device string, cu
 
     flush := func() error {
 	if len(metas) == 0 {
-	    return nil
+		return nil
 	}
-	preds, err := sess.Predict(batchInput, len(metas), inChannels, tileH, tileW, spec.OutChannels)
+	// Вычисляем предсказания для всего накопленного батча.
+	// Все модели сейчас считаются бинарными: один выходной канал.
+	preds, err := sess.Predict(batchInput, len(metas), inChannels, tileH, tileW, 1)
 	if err != nil {
-	    return err
+		return err
 	}
 
 	pixelCount := tileH * tileW
 
 	for bi, m := range metas {
-	    // базовый сдвиг по батчу
-	    base := bi * spec.OutChannels * pixelCount
+		// базовый сдвиг по батчу
+		base := bi * pixelCount
 
-	    for yy := m.wy0; yy < m.wy1; yy++ {
-		for xx := m.wx0; xx < m.wx1; xx++ {
-		    py := (yy - m.wy0) + m.cy0
-		    px := (xx - m.wx0) + m.cx0
+		for yy := m.wy0; yy < m.wy1; yy++ {
+			for xx := m.wx0; xx < m.wx1; xx++ {
+				py := (yy - m.wy0) + m.cy0
+				px := (xx - m.wx0) + m.cx0
 
-		    // смещение пикселя внутри тайла
-		    pOff := py*tileW + px
+				// смещение пикселя внутри тайла
+				pOff := py*tileW + px
 
-		    // индекс валидности
-		    vIdx := bi*pixelCount + pOff
-		    if batchValid[vIdx] == 0 {
-			out[yy*w+xx] = 0
-			continue
-		    }
+				// индекс валидности
+				vIdx := bi*pixelCount + pOff
+				if batchValid[vIdx] == 0 {
+					out[yy*w+xx] = 0
+					continue
+				}
 
-		    if spec.Mode == "argmax" && spec.OutChannels > 1 {
-			// МНОГОКЛАССОВЫЙ ВЫХОД: [C,H,W] → argmax по каналам.
-			maxVal := float32(0)
-			maxClass := 0
-			for c := 0; c < spec.OutChannels; c++ {
-			    idx := base + c*pixelCount + pOff
-			    v := preds[idx]
-			    if c == 0 || v > maxVal {
-				maxVal = v
-				maxClass = c
-			    }
+				idx := base + pOff
+				if preds[idx] > spec.Threshold {
+					out[yy*w+xx] = 1
+				} else {
+					out[yy*w+xx] = 0
+				}
 			}
-			// forest_disease_v3: 0 = фон/здоровый лес, 1..4 = патологии.
-			if maxClass > 0 {
-			    out[yy*w+xx] = 1
-			} else {
-			    out[yy*w+xx] = 0
-			}
-		    } else {
-			// БИНАРНЫЙ ВЫХОД (OutChannels == 1) — старая логика.
-			// В preds в этом случае хранятся значения единственного канала.
-			idx := base + pOff // при OutChannels=1 base == bi*1*pixelCount
-			if preds[idx] > spec.Threshold {
-			    out[yy*w+xx] = 1
-			} else {
-			    out[yy*w+xx] = 0
-			}
-		    }
 		}
-	    }
 	}
 
 	metas = metas[:0]
 	batchInput = batchInput[:0]
 	batchValid = batchValid[:0]
 	return nil
-    }
-
-    for y0 := 0; y0 < h; y0 += stepY {
+}
+for y0 := 0; y0 < h; y0 += stepY {
 	for x0 := 0; x0 < w; x0 += stepX {
 	    patch := make([]float32, inChannels*tileH*tileW)
 	    valid := make([]uint8, tileH*tileW)
@@ -250,24 +218,19 @@ func RunModel(inTif, onnxModel, outPath string, batchSize int, device string, cu
 	    }
 	}
     }
-    if err := flush(); err != nil {
-	return err
-    }
+	if err := flush(); err != nil {
+		return err
+	}
 
-    // Всегда сначала пишем raster mask (он нужен и для tif, и как промежуточный для shp)
-    maskTif := outPath
-    if format == "shp" {
-	maskTif = filepath.Join(filepath.Dir(outPath), spec.Name+"_mask.tif")
-    }
-    if err := WriteGeoTIFF1(maskTif, out, w, h, geo, proj); err != nil {
-	return err
-    }
-    if format == "tif" {
+	// Всегда сначала пишем raster mask как временный GeoTIFF,
+	// затем полигонализируем его в итоговый SHP и удаляем временный файл.
+	maskTif := filepath.Join(filepath.Dir(outPath), spec.Name+"_mask.tif")
+	if err := WriteGeoTIFF1(maskTif, out, w, h, geo, proj); err != nil {
+		return err
+	}
+	if err := PolygonizeMaskToShapefile(maskTif, outPath, minArea, simplify); err != nil {
+		return err
+	}
+	_ = os.Remove(maskTif)
 	return nil
-    }
-    // format == "shp"
-    if err := PolygonizeMaskToShapefile(maskTif, outPath, minArea, simplify); err != nil {
-	return err
-    }
-    return nil
 }
