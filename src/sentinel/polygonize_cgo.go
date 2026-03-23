@@ -163,3 +163,13 @@ func PolygonizeMaskToShapefile(maskTif string, outShp string, minArea float64, s
 	C.OGR_DS_SyncToDisk(ods)
 	return nil
 }
+
+// PolygonizeMask converts a temporary mask raster into a temporary shapefile and returns its .shp path.
+func PolygonizeMask(maskTif string, classValue int, minArea float64, simplifyTol float64) (string, error) {
+	_ = classValue // current implementation polygonizes full binary mask and keeps DN==1
+	shp := strings.TrimSuffix(maskTif, filepath.Ext(maskTif)) + ".shp"
+	if err := PolygonizeMaskToShapefile(maskTif, shp, minArea, simplifyTol); err != nil {
+		return "", err
+	}
+	return shp, nil
+}

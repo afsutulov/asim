@@ -1,0 +1,79 @@
+:root {
+  --primary: #245b93;
+  --primary-dark: #163e68;
+  --accent: #d24a43;
+  --bg: #edf3f8;
+  --card: rgba(255,255,255,.92);
+  --text: #1c2a39;
+  --muted: #617285;
+  --border: rgba(22,62,104,.12);
+  --shadow: 0 18px 45px rgba(16,38,63,.12);
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, Arial, sans-serif; background: linear-gradient(180deg, #f1f5f9, #e5eef7); color: var(--text); }
+.hidden { display: none !important; }
+.glass-card, .glass-subcard { background: var(--card); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 24px; box-shadow: var(--shadow); }
+.glass-subcard { padding: 22px; }
+button, input, select { font: inherit; }
+input, select { width: 100%; padding: 12px 14px; border: 1px solid rgba(22,62,104,.18); border-radius: 14px; background: #fff; }
+input:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 4px rgba(36,91,147,.12); }
+button { border: none; cursor: pointer; border-radius: 14px; padding: 12px 18px; transition: transform .18s ease, opacity .2s ease, background .2s ease; }
+button:hover { transform: translateY(-1px); }
+.primary-btn, .soft-btn, .download-link, .login-form button { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; text-decoration: none; display: inline-block; }
+.link-btn, .download-link { padding: 12px 18px; border-radius: 14px; line-height: 1.2; }
+.ghost-btn { background: #ffffff; color: var(--primary-dark); border: 1px solid rgba(255,255,255,.55); }
+.ghost-link { display: inline-block; color: var(--primary); text-decoration: none; margin: 0 0 18px; }
+.alert { margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: rgba(210,74,67,.12); color: #8c1e19; }
+.shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 18px 24px; background: linear-gradient(90deg, var(--primary-dark), var(--primary)); color: #fff; box-shadow: 0 10px 30px rgba(16, 38, 63, 0.16); }
+.topbar-left { display: flex; align-items: center; gap: 20px; }
+.header-logo, .login-logo { width: auto; height: 64px; flex-shrink: 0; }
+.header-title { font-weight: 700; line-height: 1.35; }
+.topbar-right { display: flex; align-items: center; gap: 14px; }
+.username { font-weight: 600; }
+.main-layout { display: grid; grid-template-columns: 270px 1fr; gap: 22px; padding: 24px; }
+.single-column { grid-template-columns: 1fr; }
+.sidebar { padding: 16px; display: grid; gap: 12px; align-content: start; }
+.menu-item { text-align: left; background: transparent; color: var(--text); border: 1px solid transparent; }
+.menu-item.active, .menu-item:hover { background: rgba(36,91,147,.08); border-color: rgba(36,91,147,.12); }
+.content { padding: 24px; min-height: 70vh; }
+.section-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+.section-header.compact { margin-bottom: 14px; }
+.table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 18px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 14px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { text-align: center; background: rgba(36,91,147,.06); }
+.table-center { text-align: center; }
+.table-left { text-align: left; }
+.footer { padding: 16px 24px; background: #1f4f80; color: #fff; font-size: .95rem; border-top: 4px solid var(--accent); }
+.files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
+.file-item { padding: 22px; border-radius: 20px; border: 1px solid var(--border); background: rgba(255,255,255,.94); text-decoration: none; color: inherit; transition: transform .2s ease, box-shadow .25s ease; }
+.file-item:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+.file-icon { font-size: 3rem; margin-bottom: 12px; }
+.file-name { font-weight: 600; word-break: break-word; }
+.path-badge { padding: 8px 12px; border-radius: 999px; background: rgba(36,91,147,.08); color: var(--primary-dark); }
+.muted { color: var(--muted); font-size: .92rem; }
+.snapshots-frame { width: 100%; min-height: 72vh; border: none; border-radius: 18px; background: rgba(255,255,255,0.78); }
+.snapshot-embed-body { background: transparent; padding: 0; }
+.snapshot-embed-wrap { padding: 18px 22px 22px; }
+.snapshot-grid { padding: 8px 2px 2px; }
+.outer-snapshot-grid { padding: 8px 0 0; }
+.logs-stack { display: grid; gap: 18px; }
+.log-box { min-height: 240px; max-height: 320px; overflow: auto; margin: 0; padding: 16px; background: #11253a; color: #d7e7f7; border-radius: 18px; border: 1px solid rgba(255,255,255,.08); white-space: pre-wrap; }
+.stack-form { display: grid; gap: 14px; }
+.profile-card { margin-bottom: 18px; display: grid; gap: 10px; }
+.admin-panels { display: grid; gap: 18px; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(12, 24, 36, .48); display: grid; place-items: center; padding: 20px; z-index: 1000; }
+.modal { width: min(100%, 720px); padding: 22px; }
+.modal.large { width: min(100%, 860px); }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.form-grid .full { grid-column: 1 / -1; }
+.file-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.login-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login-card { width: min(100%, 540px); padding: 30px; }
+.login-brand { display: grid; justify-items: center; gap: 12px; text-align: center; margin-bottom: 22px; }
+.login-form { display: grid; gap: 16px; }
+.inline-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.note { color: var(--muted); font-size: .92rem; }
+@media (max-width: 1100px) { .main-layout { grid-template-columns: 1fr; } .sidebar { grid-template-columns: repeat(3, 1fr); } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .topbar, .section-header { flex-direction: column; align-items: flex-start; } .sidebar { grid-template-columns: 1fr; } .header-logo, .login-logo { height: 52px; } }

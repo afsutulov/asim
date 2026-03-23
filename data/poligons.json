@@ -1,0 +1,158 @@
+{
+  "kray": {
+    "name": "Пермский край",
+    "public": 1
+  },
+  "perm": {
+    "name": "г. Пермь (Пермский ГО)",
+    "public": 1
+  },
+  "permsky": {
+    "name": "Пермский МО",
+    "public": 1
+  },
+  "bardimsky": {
+    "name": "Бардымский МО",
+    "public": 1
+  },
+  "berezovsky": {
+    "name": "Березовский МО",
+    "public": 1
+  },
+  "bolshesosnovsky": {
+    "name": "Большесосновский МО",
+    "public": 1
+  },
+  "vereshaginsky": {
+    "name": "Верещагинский МО",
+    "public": 1
+  },
+  "gainsky": {
+    "name": "Гаинский МО",
+    "public": 1
+  },
+  "gornozavodsky": {
+    "name": "Горнозаводский МО",
+    "public": 1
+  },
+  "elovsky": {
+    "name": "Еловский МО",
+    "public": 1
+  },
+  "ilinsky": {
+    "name": "Ильинский МО",
+    "public": 1
+  },
+  "karagaysky": {
+    "name": "Карагайский МО",
+    "public": 1
+  },
+  "kishersky": {
+    "name": "Кишерский МО",
+    "public": 1
+  },
+  "kosinsky": {
+    "name": "Косинский МО",
+    "public": 1
+  },
+  "kochevsky": {
+    "name": "Кочевский МО",
+    "public": 1
+  },
+  "krasnovishersky": {
+    "name": "Красновишерский МО",
+    "public": 1
+  },
+  "kudimkarsky": {
+    "name": "Кудымкарский МО",
+    "public": 1
+  },
+  "kuedinsky": {
+    "name": "Куединский МО",
+    "public": 1
+  },
+  "kungugsky": {
+    "name": "Кунгурский МО",
+    "public": 1
+  },
+  "nitvensky": {
+    "name": "Нытвенский МО",
+    "public": 1
+  },
+  "oktyabrsky": {
+    "name": "Октябрский МО",
+    "public": 1
+  },
+  "ordinsky": {
+    "name": "Ординский МО",
+    "public": 1
+  },
+  "osinsky": {
+    "name": "Осинский МО",
+    "public": 1
+  },
+  "ohansky": {
+    "name": "Оханский МО",
+    "public": 1
+  },
+  "ochersky": {
+    "name": "Очерский МО",
+    "public": 1
+  },
+  "sivinsky": {
+    "name": "Сивинский МО",
+    "public": 1
+  },
+  "solikamsky": {
+    "name": "Соликамский МО",
+    "public": 1
+  },
+  "suksunsky": {
+    "name": "Суксунский МО",
+    "public": 1
+  },
+  "uinsky": {
+    "name": "Уинский МО",
+    "public": 1
+  },
+  "usolsky": {
+    "name": "Усольский МО",
+    "public": 1
+  },
+  "chastinsky": {
+    "name": "Частинский МО",
+    "public": 1
+  },
+  "cherdinsky": {
+    "name": "Чердынский МО",
+    "public": 1
+  },
+  "chernushensky": {
+    "name": "Чернушенский МО",
+    "public": 1
+  },
+  "yurlensky": {
+    "name": "Юрленский МО",
+    "public": 1
+  },
+  "usvensky": {
+    "name": "Юсьвенский МО",
+    "public": 1
+  },
+  "pashni": {
+    "name": "Границы пашень",
+    "public": 0
+  },
+  "dca0ec0798a641779997303b22b0a65c": {
+    "name": "Arable test",
+    "public": 2
+  },
+  "zvesdniy": {
+    "name": "ЗАТО Звездный",
+    "public": 1
+  },
+  "dobryansky": {
+    "name": "Добрянский МО",
+    "public": 1
+  }
+}

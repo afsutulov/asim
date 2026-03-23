@@ -1,0 +1,18 @@
+{
+  "6fc3582f-c0ec-4be9-b5da-4def218d7c4c": {
+    "model": "hogweed",
+    "poligon": "kray",
+    "cloud": 50,
+    "start": "2025-07-15",
+    "end": "2025-08-15",
+    "time": "2026-03-23 06:25"
+  },
+  "7016fdd6-074a-4beb-ac11-94b060107095": {
+    "model": "hogweed",
+    "poligon": "perm",
+    "cloud": 100,
+    "start": "2024-07-15",
+    "end": "2024-08-15",
+    "time": "2026-03-23 06:49"
+  }
+}
