@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon/favicon-16x16.png') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon/favicon-32x32.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <title>Снимки</title>
+</head>
+<body class="snapshot-embed-body">
+  <div class="snapshot-embed-wrap">
+    <div class="snapshot-toolbar"><span class="path-badge">{{ current_rel }}</span></div><br>
+    {% if parent %}<a class="ghost-link" href="{{ parent }}">← На уровень выше</a>{% endif %}
+    <div class="files-grid snapshot-grid">
+      {% for entry in entries %}
+        <a href="{{ entry.link }}" class="file-item">
+          <div class="file-icon">{{ '📁' if entry.is_dir else '📄' }}</div>
+          <div class="file-name">{{ entry.name }}</div>
+          {% if not entry.is_dir %}<div class="muted">{{ entry.size }} байт</div>{% endif %}
+        </a>
+      {% else %}<div class="muted">Каталог пуст.</div>{% endfor %}
+    </div>
+  </div>
+</body>
+</html>

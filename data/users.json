@@ -1,0 +1,42 @@
+{
+  "afsutulov": {
+    "name": "Александр Сутулов",
+    "password": "$6$xQY5mvFly9Dq5Ha4$NxD8meB4bt8UhzZzlvaG57jOvtBsKfBzG6Adlahx42XSdUV/W2ltlK8DeVhRDD4SWFUOq/nFvWSWv90n0Y5qN0",
+    "group": "admin"
+  },
+  "svdallada": {
+    "name": "Сергей Владимирович Даллада",
+    "group": "admin",
+    "password": "$6$RhPjocnEgLZrTy4m$L6g6eCSMrrE3H4cS3WAqAJfpBX4TTt5Fq6lbfavtLZBeWkFcL5WsRgc5Ia0/ewtJ6nvJPKHjBoy8kVsy6O1T6."
+  },
+  "vvzamiatin": {
+    "name": "Валерьян Замятин",
+    "group": "user",
+    "password": "$6$vT5z4OkiRAoATixK$lVwX6txoGDzaOXvQd0mO6WpvS47CEoImU7jUDRT3LrzHL/5NyfJQhOR5CMDk7rHDqR2lfX06MmWZsw0p5fEJd0"
+  },
+  "vvevtushenko": {
+    "name": "Владислав Евтушенко",
+    "group": "user",
+    "password": "$6$RH.tN7qm0HyWdqcL$/yJmM11FAJpijYKTUpS/p6BXDeL7sV92StdhTc4q6nuw7Aa3xF7s5/F3woARaf/lnCTQDtYFabgRPbtuupWld0"
+  },
+  "dvmakurin": {
+    "name": "Дмитрий Владиславович Макурин, Минприроды",
+    "group": "satellite",
+    "password": "$6$2bF55CX2vIIu0alK$lXMoPfm6EyslFP.xog8R2dZlmDCnXtlm1/GadvFjS0X/WCG7.vh72nKzVWhxvngb0trmD97oFTjkO2uLipnmq."
+  },
+  "eaputina": {
+    "name": "Евгения Алексеевна Путина, Минприроды",
+    "group": "satellite",
+    "password": "$6$dFVQYuwZbT33Nfd4$LlPbyF2qbp4Oz/2oX59ocvBQLsMsLTJwutIUvyDGvyu9yzq42./WrvkYMw4hWIM8u/6nja0a7D5zO1/huYKNV."
+  },
+  "datsukerman": {
+    "name": "Дмитрий Александрович Цукерман, Минприроды",
+    "group": "satellite",
+    "password": "$6$BYwFhkSMcTskardS$xv.50q35r/zjyl5jKGSDk0EcIKHrd13Ay1ZGLDM58K.fxqDvbWHv8psw.HtDHE.a.RuV49mY3JVcqTjZfI0D8/"
+  },
+  "vsmizeva": {
+    "name": "Виктория Сергеевна Мизева, Минприроды",
+    "group": "satellite",
+    "password": "$6$bcbu2TPATnVYet9q$aWwA35vJdtlIBwhmJRKWmYdo9EZbA2QMjTTfnWtHR6p6PtZcB6plM7MBbRBlslaCAmspb0BMpABIZQ82HRcgI1"
+  }
+}
