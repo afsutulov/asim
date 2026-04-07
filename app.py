@@ -288,7 +288,7 @@ def is_admin(user: dict[str, Any]) -> bool:
 def model_options(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     items = []
     for key, value in cfg.get("models", {}).items():
-        items.append({"key": key, "description": value.get("description", key), "inputs": int(value.get("inputs", 1))})
+        items.append({"key": key, "description": value.get("description", key), "inputs": int(value.get("inputs", 1)), "season": value.get("season", "")})
     return sorted(items, key=lambda item: item["description"])
 
 
@@ -352,8 +352,10 @@ def enrich_rows(source: dict[str, Any], cfg: dict[str, Any], include_download: b
             "model": models.get(item.get("model"), {}).get("description", item.get("model", "—")),
             "poligon": poligons.get(item.get("poligon"), {}).get("name", item.get("poligon", "—")),
             "cloud": f"{item.get('cloud', '—')}%" if item.get("cloud") is not None else "—",
-            "start": format_date(item.get("start2") or item.get("start")),
+            "start": format_date(item.get("start")),
             "end": format_date(item.get("end")),
+            "start2": format_date(item.get("start2")),
+            "end2": format_date(item.get("end2")),
             "time": format_date(item.get("time")),
             "raw_time": item.get("time"),
         }
@@ -599,32 +601,90 @@ def api_logs():
     return jsonify(payload)
 
 
+
+SEASON_DATES = {
+    "spring": ("03-01", "05-31"),
+    "summer": ("06-01", "08-31"),
+    "autumn": ("09-01", "11-30"),
+    "winter": ("12-01", "02-28"),
+}
+
+def season_to_dates(season: str, year: int) -> tuple[str, str]:
+    start_md, end_md = SEASON_DATES[season]
+    start = f"{year}-{start_md}"
+    end = f"{year + 1}-{end_md}" if season == "winter" else f"{year}-{end_md}"
+    return start, end
+
+def available_years(cfg: dict[str, Any]) -> list[int]:
+    sentinel_dir = resolve_path(cfg.get("sentinel") or cfg.get("satellite"), BASE_DIR / "sentinel")
+    years = []
+    if sentinel_dir.exists():
+        for entry in sorted(sentinel_dir.iterdir()):
+            if entry.is_dir() and entry.name.isdigit() and len(entry.name) == 4:
+                if (entry / "cash.json").exists():
+                    years.append(int(entry.name))
+    return sorted(years)
+
+@app.route("/api/available-years")
+def api_available_years():
+    require_any_group("admin", "user")
+    return jsonify(available_years(runtime.load_config()))
+
+
 @app.route("/api/processing/create", methods=["POST"])
 def create_processing():
     user = require_any_group("admin", "user")
     cfg = runtime.load_config()
     payload = request.get_json(silent=True) or {}
     model_key = payload.get("model")
-    start = payload.get("start")
-    end = payload.get("end")
-    start2 = payload.get("start2")
-    end2 = payload.get("end2")
     cloud = int(payload.get("cloud", 50))
     poligon = payload.get("poligon")
 
     if model_key not in cfg.get("models", {}):
         return jsonify({"error": "Неизвестная модель"}), 400
-    if not start or not end:
-        return jsonify({"error": "Нужно заполнить даты начала и завершения"}), 400
     if poligon not in {item['key'] for item in processing_poligon_options(cfg)}:
         return jsonify({"error": "Нужно выбрать локацию"}), 400
     if cloud < 0 or cloud > 100:
         return jsonify({"error": "Облачность должна быть от 0 до 100"}), 400
 
-    entry = {"model": model_key, "poligon": poligon, "cloud": cloud, "start": start, "end": end, "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
-    if int(cfg["models"][model_key].get("inputs", 1)) == 2:
-        if not start2 or not end2:
+    model_spec = cfg["models"][model_key]
+    is_two_input = int(model_spec.get("inputs", 1)) == 2
+    season = model_spec.get("season", "")
+
+    if season:
+        # Сезонная модель: даты вычисляются из года.
+        # Работает независимо от inputs — год выбирается всегда когда задан season.
+        try:
+            year = int(payload.get("year", 0))
+        except (ValueError, TypeError):
+            return jsonify({"error": "Укажите корректный год"}), 400
+        if not year:
+            return jsonify({"error": "Нужно выбрать год снимка"}), 400
+        start, end = season_to_dates(season, year)
+        start2, end2 = None, None
+        if is_two_input:
+            try:
+                year2 = int(payload.get("year2", 0))
+            except (ValueError, TypeError):
+                return jsonify({"error": "Укажите корректный год базового снимка"}), 400
+            if not year2:
+                return jsonify({"error": "Нужно выбрать год базового снимка"}), 400
+            if year == year2:
+                return jsonify({"error": "Год нового и базового снимка должны отличаться"}), 400
+            start2, end2 = season_to_dates(season, year2)
+    else:
+        start = payload.get("start")
+        end = payload.get("end")
+        start2 = payload.get("start2")
+        end2 = payload.get("end2")
+        if not start or not end:
+            return jsonify({"error": "Нужно заполнить даты начала и завершения"}), 400
+        if is_two_input and (not start2 or not end2):
             return jsonify({"error": "Для модели с двумя входами нужны start2 и end2"}), 400
+
+    # Формат JSON остаётся прежним
+    entry = {"model": model_key, "poligon": poligon, "cloud": cloud, "start": start, "end": end, "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    if is_two_input:
         entry["start2"] = start2
         entry["end2"] = end2
 

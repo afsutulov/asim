@@ -115,29 +115,46 @@ func readSingleBand(path string) (*bandRaster, error) {
 }
 
 func chooseReferenceBand(tile SafeTile, channels []string) (*bandRaster, error) {
+	return chooseReferenceBandWithSpec(tile, channels, ModelSpec{})
+}
+
+func chooseReferenceBandWithSpec(tile SafeTile, channels []string, spec ModelSpec) (*bandRaster, error) {
 	needed := append([]string{}, channels...)
-	needed = append(needed, "B02", "B03", "B04", "B10", "B11", "B12")
+	needed = append(needed, referenceBandCandidates(spec)...)
 	seen := map[string]struct{}{}
 	var best *bandRaster
 	for _, ch := range needed {
 		if strings.TrimSpace(ch) == "" {
 			continue
 		}
-		if ch == "NDVOG" {
-			ch = "B08"
+		norm := normalizeBandName(ch)
+		if strings.HasPrefix(norm, "NDVI") || norm == "NDVOG" {
+			norm = "B08"
 		}
-		ch = normalizeBandName(ch)
-		if _, ok := seen[ch]; ok {
+		if _, ok := seen[norm]; ok {
 			continue
 		}
-		seen[ch] = struct{}{}
-		br, err := readSingleBand(bandFile(tile, ch))
+		seen[norm] = struct{}{}
+		br, err := readSingleBand(bandFileForSpec(tile, norm, spec))
 		if err != nil {
-			return nil, err
+			continue
 		}
-		if best == nil || br.w*br.h > best.w*best.h {
+		if best == nil {
+			best = br
+			continue
+		}
+		if normalizePreprocess(spec.Preprocess) == "sentinel2a" {
+			if br.w == best.w && br.h == best.h {
+				best = br
+			}
+			continue
+		}
+		if br.w*br.h > best.w*best.h {
 			best = br
 		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("reference band not found for %s", tileLabel(tile))
 	}
 	return best, nil
 }
@@ -209,6 +226,20 @@ func sentinelTOAValue(raw float32, dateOnly string) float32 {
 	return v
 }
 
+func sentinelBOAValue(raw float32) float32 {
+	if raw == sentinelNoData {
+		return sentinelNoData
+	}
+	v := raw / 10000.0
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	return v
+}
+
 func needsRadioOffset(dateOnly string) bool {
 	ts, err := time.Parse("2006-01-02", dateOnly)
 	if err != nil {
@@ -219,32 +250,36 @@ func needsRadioOffset(dateOnly string) bool {
 
 func buildCloudMask(bands map[string][]float32, n int) []uint8 {
 	mask := make([]uint8, n)
-	required := []string{"B02", "B03", "B04", "B10", "B11", "B12"}
-	for _, key := range required {
-		if _, ok := bands[key]; !ok {
+	// simple режим: только B11, B12, B10 (как в kosmo pathology_v2)
+	if b10, ok10 := bands["B10"]; ok10 {
+		b11, ok11 := bands["B11"]
+		b12, ok12 := bands["B12"]
+		if !ok11 || !ok12 {
 			return mask
 		}
-	}
-	for i := 0; i < n; i++ {
-		b02 := bands["B02"][i]
-		b03 := bands["B03"][i]
-		b04 := bands["B04"][i]
-		b10 := bands["B10"][i]
-		b11 := bands["B11"][i]
-		b12 := bands["B12"][i]
-		f1 := float32(0)
-		if den := b03 + b11; den != 0 {
-			f1 = (b03 - b11) / den
-		}
-		f2 := (b02 + b03 + b04) / 3.0
-		f3 := b02 - 0.5*b04 - 0.08
-		if b11 < sentinelCloudThresholds["B11"] ||
-			b12 < sentinelCloudThresholds["B12"] ||
-			b10 > sentinelCloudThresholds["B10"] ||
-			f1 > sentinelCloudThresholds["F1"] ||
-			f2 > sentinelCloudThresholds["F2"] ||
-			f3 > sentinelCloudThresholds["F3"] {
-			mask[i] = 1
+		// Полный режим: дополнительно F1/F2/F3 на основе B02/B03/B04
+		b02, hasB02 := bands["B02"]
+		b03, hasB03 := bands["B03"]
+		b04, hasB04 := bands["B04"]
+		useFullFilter := hasB02 && hasB03 && hasB04
+		for i := 0; i < n; i++ {
+			cloud := b11[i] < sentinelCloudThresholds["B11"] ||
+				b12[i] < sentinelCloudThresholds["B12"] ||
+				b10[i] > sentinelCloudThresholds["B10"]
+			if !cloud && useFullFilter {
+				f1 := float32(0)
+				if den := b03[i] + b11[i]; den != 0 {
+					f1 = (b03[i] - b11[i]) / den
+				}
+				f2 := (b02[i] + b03[i] + b04[i]) / 3.0
+				f3 := b02[i] - 0.5*b04[i] - 0.08
+				cloud = f1 > sentinelCloudThresholds["F1"] ||
+					f2 > sentinelCloudThresholds["F2"] ||
+					f3 > sentinelCloudThresholds["F3"]
+			}
+			if cloud {
+				mask[i] = 1
+			}
 		}
 	}
 	return mask
@@ -259,14 +294,37 @@ func useCloudMaskForChannels(channels []string) bool {
 		if norm[0] == "B04" && norm[1] == "B03" && norm[2] == "B02" && norm[3] == "B08" {
 			return false
 		}
+
+		if len(norm) == 3 &&
+			norm[0] == "B12" &&
+			norm[1] == "B8A" &&
+			norm[2] == "B03" {
+			return false
+		}
+
 	}
 	return true
 }
 
-func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error) {
-	ref, err := chooseReferenceBand(tile, channels)
+func ReadSentinelTileCube(tile SafeTile, channels []string, cloudMaskMode string) (*RasterCube, error) {
+	return ReadSentinelTileCubeWithSpec(tile, channels, cloudMaskMode, ModelSpec{})
+}
+
+func ReadSentinelTileCubeWithSpec(tile SafeTile, channels []string, cloudMaskMode string, spec ModelSpec) (*RasterCube, error) {
+	mode := normalizePreprocess(spec.Preprocess)
+	ref, err := chooseReferenceBandWithSpec(tile, channels, spec)
 	if err != nil {
 		return nil, err
+	}
+	const maxTilePixels = 5490 * 5490
+	if !spec.PreserveNativeResolution && ref.w*ref.h > maxTilePixels {
+		fallbackBand := "B05"
+		if mode == "sentinel2a" && normalizeResolution(spec.Resolution) == "R60m" {
+			fallbackBand = "B01"
+		}
+		if refLow, errLow := readSingleBand(bandFileForSpec(tile, fallbackBand, spec)); errLow == nil {
+			ref = refLow
+		}
 	}
 	out := make([][][][]float32, 0, len(channels))
 	cache := map[string]*bandRaster{}
@@ -276,14 +334,14 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 		if br, ok := cache[ch]; ok {
 			return br, nil
 		}
-		br, err := readSingleBand(bandFile(tile, ch))
+		br, err := readSingleBand(bandFileForSpec(tile, ch, spec))
 		if err != nil {
 			return nil, err
 		}
 		cache[ch] = br
 		return br, nil
 	}
-	getResampledTOA := func(ch string) ([]float32, error) {
+	getResampled := func(ch string) ([]float32, error) {
 		ch = normalizeBandName(ch)
 		if arr, ok := resampled[ch]; ok {
 			return arr, nil
@@ -294,7 +352,11 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 		}
 		arr := bilinearResample(br, ref)
 		for i := range arr {
-			arr[i] = sentinelTOAValue(arr[i], tile.Date)
+			if mode == "sentinel2a" {
+				arr[i] = sentinelBOAValue(arr[i])
+			} else {
+				arr[i] = sentinelTOAValue(arr[i], tile.Date)
+			}
 		}
 		resampled[ch] = arr
 		return arr, nil
@@ -304,23 +366,87 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 	for i := range validMask {
 		validMask[i] = 1
 	}
-	if useCloudMaskForChannels(channels) {
-		maskBands := []string{"B02", "B03", "B04", "B10", "B11", "B12"}
-		maskInput := make(map[string][]float32, len(maskBands))
-		for _, ch := range maskBands {
-			arr, err := getResampledTOA(ch)
+	dataMaskChannels := make([][]float32, 0, len(channels))
+	for _, ch := range channels {
+		norm := normalizeBandName(ch)
+		if strings.HasPrefix(norm, "NDVI") || norm == "NDVOG" {
+			red, err := getResampled("B04")
 			if err != nil {
 				return nil, err
 			}
-			maskInput[ch] = arr
+			nir, err := getResampled("B08")
+			if err != nil {
+				return nil, err
+			}
+			tmp := make([]float32, ref.w*ref.h)
+			for i := range tmp {
+				if red[i] > 0 || nir[i] > 0 {
+					tmp[i] = 1
+				}
+			}
+			dataMaskChannels = append(dataMaskChannels, tmp)
+			continue
 		}
-		cloudMask := buildCloudMask(maskInput, ref.w*ref.h)
-		for i := range validMask {
-			if cloudMask[i] != 0 {
-				validMask[i] = 0
+		arr, err := getResampled(norm)
+		if err != nil {
+			return nil, err
+		}
+		dataMaskChannels = append(dataMaskChannels, arr)
+	}
+	for i := range validMask {
+		hasData := false
+		for _, arr := range dataMaskChannels {
+			if arr[i] > 0 {
+				hasData = true
+				break
+			}
+		}
+		if !hasData {
+			validMask[i] = 0
+		}
+	}
+
+	if mode == "sentinel2a" {
+		sclPath := bandFileForSpec(tile, "SCL", spec)
+		if !strings.Contains(filepath.Base(sclPath), "MISSING_SCL") {
+			sclBr, err := readSingleBand(sclPath)
+			if err == nil {
+				scl := bilinearResample(sclBr, ref)
+				for i, v := range scl {
+					cls := int(v + 0.5)
+					switch cls {
+					case 0, 1, 3, 8, 9, 10, 11:
+						validMask[i] = 0
+					}
+				}
+			}
+		}
+	} else {
+		effectiveCloudMode := strings.ToLower(strings.TrimSpace(cloudMaskMode))
+		if effectiveCloudMode != "none" && useCloudMaskForChannels(channels) {
+			var maskBands []string
+			if effectiveCloudMode == "simple" {
+				maskBands = []string{"B10", "B11", "B12"}
+			} else {
+				maskBands = []string{"B02", "B03", "B04", "B10", "B11", "B12"}
+			}
+			maskInput := make(map[string][]float32, len(maskBands))
+			for _, ch := range maskBands {
+				arr, err := getResampled(ch)
+				if err != nil {
+					return nil, err
+				}
+				maskInput[ch] = arr
+			}
+			cloudMask := buildCloudMask(maskInput, ref.w*ref.h)
+			for i := range validMask {
+				if cloudMask[i] != 0 {
+					validMask[i] = 0
+				}
 			}
 		}
 	}
+
 	validCount := 0
 	for i := range validMask {
 		if validMask[i] != 0 {
@@ -335,19 +461,18 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 	for _, ch := range channels {
 		ch = normalizeBandName(ch)
 		var arr []float32
-		if ch == "NDVOG" {
-			red, err := getResampledTOA("B04")
+		if ch == "NDVOG" || strings.HasPrefix(ch, "NDVI") {
+			red, err := getResampled("B04")
 			if err != nil {
 				return nil, err
 			}
-			nir, err := getResampledTOA("B08")
+			nir, err := getResampled("B08")
 			if err != nil {
 				return nil, err
 			}
 			arr = make([]float32, ref.w*ref.h)
 			for i := range arr {
 				if validMask[i] == 0 || red[i] == 0 || nir[i] == 0 {
-					arr[i] = 0
 					continue
 				}
 				den := nir[i] + red[i]
@@ -356,8 +481,7 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 				}
 			}
 		} else {
-			var err error
-			arr, err = getResampledTOA(ch)
+			arr, err = getResampled(ch)
 			if err != nil {
 				return nil, err
 			}
@@ -366,6 +490,149 @@ func ReadSentinelTileCube(tile SafeTile, channels []string) (*RasterCube, error)
 				if validMask[i] == 0 {
 					arr[i] = 0
 				}
+			}
+		}
+		im := make([][][]float32, 1)
+		im[0] = make([][]float32, ref.h)
+		for y := 0; y < ref.h; y++ {
+			row := make([]float32, ref.w)
+			copy(row, arr[y*ref.w:(y+1)*ref.w])
+			im[0][y] = row
+		}
+		out = append(out, im)
+	}
+	return &RasterCube{Data: out, Geo: ref.geo, Proj: ref.proj, W: ref.w, H: ref.h, ValidMask: validMask}, nil
+}
+
+func selectBestTileForInterval(tiles []SafeTile, start, end time.Time) (SafeTile, bool) {
+	var best SafeTile
+	found := false
+	for _, tile := range tiles {
+		t := tileTime(tile)
+		if t.Before(start) || t.After(end) {
+			continue
+		}
+		if !found || tile.Cloud < best.Cloud || (tile.Cloud == best.Cloud && t.After(tileTime(best))) {
+			best = tile
+			found = true
+		}
+	}
+	if found {
+		return best, true
+	}
+	mid := start.Add(end.Sub(start) / 2)
+	bestDist := time.Duration(1<<63 - 1)
+	for _, tile := range tiles {
+		d := tileTime(tile).Sub(mid)
+		if d < 0 {
+			d = -d
+		}
+		if !found || d < bestDist || (d == bestDist && tile.Cloud < best.Cloud) {
+			best = tile
+			bestDist = d
+			found = true
+		}
+	}
+	return best, found
+}
+
+func buildIntervals(start, end string, n int) ([][2]time.Time, error) {
+	if n <= 0 {
+		return nil, fmt.Errorf("invalid interval count: %d", n)
+	}
+	startDate, err := parseDateOnly(start)
+	if err != nil {
+		return nil, err
+	}
+	endDate, err := parseDateOnly(end)
+	if err != nil {
+		return nil, err
+	}
+	if endDate.Before(startDate) {
+		return nil, fmt.Errorf("end date before start date")
+	}
+	endExclusive := endDate.Add(24 * time.Hour)
+	dur := endExclusive.Sub(startDate)
+	step := dur / time.Duration(n)
+	if step <= 0 {
+		step = 24 * time.Hour
+	}
+	out := make([][2]time.Time, n)
+	cur := startDate
+	for i := 0; i < n; i++ {
+		next := cur.Add(step)
+		if i == n-1 || next.After(endExclusive) {
+			next = endExclusive
+		}
+		out[i] = [2]time.Time{cur, next.Add(-time.Nanosecond)}
+		cur = next
+	}
+	return out, nil
+}
+
+func BuildNDVITimeSeriesCube(tiles []SafeTile, spec ModelSpec, start, end string) (*RasterCube, error) {
+	if len(tiles) == 0 {
+		return nil, fmt.Errorf("no tiles for NDVI time series")
+	}
+	intervals, err := buildIntervals(start, end, len(spec.Channels))
+	if err != nil {
+		return nil, err
+	}
+	ref, err := chooseReferenceBandWithSpec(tiles[0], []string{"B08"}, spec)
+	if err != nil {
+		return nil, err
+	}
+	const maxTilePixels = 5490 * 5490
+	if !spec.PreserveNativeResolution && ref.w*ref.h > maxTilePixels {
+		if refLow, errLow := readSingleBand(bandFileForSpec(tiles[0], "B05", spec)); errLow == nil {
+			ref = refLow
+		}
+	}
+	out := make([][][][]float32, 0, len(spec.Channels))
+	validMask := make([]uint8, ref.w*ref.h)
+	for i := range validMask {
+		validMask[i] = 1
+	}
+	for _, iv := range intervals {
+		tile, ok := selectBestTileForInterval(tiles, iv[0], iv[1])
+		if !ok {
+			arr := make([]float32, ref.w*ref.h)
+			im := make([][][]float32, 1)
+			im[0] = make([][]float32, ref.h)
+			for y := 0; y < ref.h; y++ {
+				row := make([]float32, ref.w)
+				copy(row, arr[y*ref.w:(y+1)*ref.w])
+				im[0][y] = row
+			}
+			out = append(out, im)
+			continue
+		}
+		redBr, err := readSingleBand(bandFileForSpec(tile, "B04", spec))
+		if err != nil {
+			return nil, err
+		}
+		nirBr, err := readSingleBand(bandFileForSpec(tile, "B08", spec))
+		if err != nil {
+			return nil, err
+		}
+		red := bilinearResample(redBr, ref)
+		nir := bilinearResample(nirBr, ref)
+		arr := make([]float32, ref.w*ref.h)
+		for i := range arr {
+			redv := sentinelTOAValue(red[i], tile.Date)
+			nirv := sentinelTOAValue(nir[i], tile.Date)
+			if redv <= 0 && nirv <= 0 {
+				validMask[i] = 0
+				arr[i] = 0
+				continue
+			}
+			den := nirv + redv
+			if den != 0 {
+				ndvi := (nirv - redv) / den
+				if ndvi < 0 {
+					ndvi = 0
+				}
+				arr[i] = ndvi
 			}
 		}
 		im := make([][][]float32, 1)
@@ -516,6 +783,10 @@ func WriteGeoTIFF1(path string, data []float32, w, h int, geo [6]float64, proj s
 		ds.SetProjection(proj)
 	}
 	band := ds.RasterBand(1)
-	band.SetNoDataValue(0)
+	// Не устанавливаем NoDataValue: GDALPolygonize должен обрабатывать все пиксели
+	// включая нули внутри областей детекции — это создаёт дыры в полигонах,
+	// как в kosmo rasterio.features.shapes (полигонизация по всем значениям).
+	// SetNoDataValue(0) заставляло GDAL игнорировать нулевые пиксели → нет дыр →
+	// полигоны без дыр имеют большую площадь чем в kosmo.
 	return band.IO(gdal.Write, 0, 0, w, h, data, w, h, 0, 0)
 }

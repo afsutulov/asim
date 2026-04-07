@@ -25,11 +25,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -37,6 +38,7 @@ import (
 
 type Config struct {
 	Sentinel    string `json:"sentinel"`
+	Sentinel2A  string `json:"sentinel2A"`
 	Logs        string `json:"logs"`
 	ResultsFile string `json:"results"`
 	ResultsPath string `json:"results_path"`
@@ -51,23 +53,27 @@ type TileCache struct {
 }
 
 type SafeTileEntry struct {
-	Date         string     `json:"date"`
-	CapturedAt   string     `json:"captured_at,omitempty"`
-	SceneID      string     `json:"scene_id,omitempty"`
-	SafeName     string     `json:"safe_name,omitempty"`
-	ImgDataPath  string     `json:"img_data_path"`
-	Cloud        float64    `json:"cloud"`
-	Envelope     [4]float64 `json:"envelope"`
-	FootprintWKT string     `json:"footprint_wkt,omitempty"`
-	TileID       string     `json:"tile_id"`
+	Date                  string     `json:"date"`
+	CapturedAt            string     `json:"captured_at,omitempty"`
+	SceneID               string     `json:"scene_id,omitempty"`
+	SafeName              string     `json:"safe_name,omitempty"`
+	ImgDataPath           string     `json:"img_data_path"`
+	Cloud                 float64    `json:"cloud"`
+	NodataPixelPercentage *float64   `json:"nodata_pixel_percentage,omitempty"`
+	Envelope              [4]float64 `json:"envelope"`
+	TileID                string     `json:"tile_id"`
 }
 
 type mtdMSIL1C struct {
-	XMLName xml.Name `xml:"Level-1C_User_Product"`
-	Cloud   *float64 `xml:"Quality_Indicators_Info>Image_Content_QI>Cloud_Coverage_Assessment"`
+	XMLName             xml.Name `xml:"Level-1C_User_Product"`
+	CloudCoverageLegacy *float64 `xml:"Quality_Indicators_Info>Cloud_Coverage_Assessment"`
+	CloudyPixelPercent  *float64 `xml:"Quality_Indicators_Info>CLOUDY_PIXEL_PERCENTAGE"`
 }
 
-var cloudRe = regexp.MustCompile(`(?s)<Cloud_Coverage_Assessment>([-+]?[0-9]*\.?[0-9]+)</Cloud_Coverage_Assessment>`)
+type l2AMetadata struct {
+	Cloud  float64
+	Nodata float64
+}
 
 func defaultConfigPath() string { return filepath.Join("data", "config.json") }
 
@@ -159,35 +165,142 @@ func readTileCloud(metaPath string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	match := cloudRe.FindSubmatch(data)
-	if len(match) == 2 {
-		var v float64
-		if _, err := fmt.Sscanf(string(match[1]), "%f", &v); err == nil {
-			return v, nil
-		}
-	}
+
 	var m mtdMSIL1C
-	if err := xml.Unmarshal(data, &m); err == nil && m.Cloud != nil {
-		return *m.Cloud, nil
+	if err := xml.Unmarshal(data, &m); err != nil {
+		return 0, fmt.Errorf("xml parse failed for %s: %w", metaPath, err)
 	}
+
+	if m.CloudCoverageLegacy != nil {
+		return *m.CloudCoverageLegacy, nil
+	}
+	if m.CloudyPixelPercent != nil {
+		return *m.CloudyPixelPercent, nil
+	}
+
 	return 0, fmt.Errorf("cloud coverage not found in %s", metaPath)
 }
 
+func readL2AMetadata(metaPath string) (*l2AMetadata, error) {
+	f, err := os.Open(metaPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	dec := xml.NewDecoder(f)
+	out := &l2AMetadata{}
+	var haveCloud bool
+	var haveNodata bool
+
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("xml parse failed for %s: %w", metaPath, err)
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		switch se.Name.Local {
+		case "Cloud_Coverage_Assessment", "CLOUDY_PIXEL_PERCENTAGE":
+			var s string
+			if err := dec.DecodeElement(&s, &se); err != nil {
+				return nil, fmt.Errorf("xml decode failed for %s: %w", metaPath, err)
+			}
+			v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if err == nil {
+				out.Cloud = v
+				haveCloud = true
+			}
+		case "NODATA_PIXEL_PERCENTAGE":
+			var s string
+			if err := dec.DecodeElement(&s, &se); err != nil {
+				return nil, fmt.Errorf("xml decode failed for %s: %w", metaPath, err)
+			}
+			v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if err == nil {
+				out.Nodata = v
+				haveNodata = true
+			}
+		}
+	}
+
+	if !haveCloud {
+		return nil, fmt.Errorf("cloud coverage not found in %s", metaPath)
+	}
+	if !haveNodata {
+		return nil, fmt.Errorf("NODATA_PIXEL_PERCENTAGE not found in %s", metaPath)
+	}
+	return out, nil
+}
+
 func firstJP2InDir(imgDataPath string) (string, error) {
-	entries, err := os.ReadDir(imgDataPath)
+	var found string
+	err := filepath.WalkDir(imgDataPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(d.Name())
+		if strings.HasSuffix(name, ".jp2") && !strings.Contains(name, "_tci.") {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
-		}
-		name := strings.ToLower(ent.Name())
-		if strings.HasSuffix(name, ".jp2") && !strings.Contains(name, "_tci.") {
-			return filepath.Join(imgDataPath, ent.Name()), nil
-		}
+	if found == "" {
+		return "", fmt.Errorf("no jp2 found in %s", imgDataPath)
 	}
-	return "", fmt.Errorf("no jp2 found in %s", imgDataPath)
+	return found, nil
+}
+
+func findBandJP2(imgDataPath, band string) (string, error) {
+	needle := "_" + strings.ToLower(strings.TrimSpace(band)) + ".jp2"
+	var found string
+
+	err := filepath.WalkDir(imgDataPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(d.Name())
+		if strings.HasSuffix(name, needle) {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", fmt.Errorf("band %s not found in %s", band, imgDataPath)
+	}
+	return found, nil
+}
+
+func shouldIndexByB02Size(imgDataPath string, minBytes int64) (bool, error) {
+	b02, err := findBandJP2(imgDataPath, "B02")
+	if err != nil {
+		return false, err
+	}
+	st, err := os.Stat(b02)
+	if err != nil {
+		return false, err
+	}
+	return st.Size() >= minBytes, nil
 }
 
 func envelopeWGS84FromJP2(path string) ([4]float64, error) {
@@ -257,20 +370,6 @@ func envelopeWGS84FromJP2(path string) ([4]float64, error) {
 	return env, nil
 }
 
-func footprintWKTFromJP2(path string) (string, error) {
-	env, err := envelopeWGS84FromJP2(path)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("POLYGON((%.12f %.12f, %.12f %.12f, %.12f %.12f, %.12f %.12f, %.12f %.12f))",
-		env[0], env[1],
-		env[2], env[1],
-		env[2], env[3],
-		env[0], env[3],
-		env[0], env[1],
-	), nil
-}
-
 func dedupeTiles(entries []SafeTileEntry) ([]SafeTileEntry, int) {
 	seen := make(map[string]SafeTileEntry, len(entries))
 	for _, e := range entries {
@@ -301,7 +400,7 @@ func dedupeTiles(entries []SafeTileEntry) ([]SafeTileEntry, int) {
 
 func buildSentinelCacheForYear(yearDir string) (*TileCache, error) {
 	yearName := filepath.Base(yearDir)
-	cache := &TileCache{Version: 8, Preprocess: "sentinel", Generated: time.Now().Format(time.RFC3339), Tiles: make([]SafeTileEntry, 0, 256)}
+	cache := &TileCache{Version: 9, Preprocess: "sentinel", Generated: time.Now().Format(time.RFC3339), Tiles: make([]SafeTileEntry, 0, 256)}
 	entries, err := os.ReadDir(yearDir)
 	if err != nil {
 		return nil, err
@@ -315,48 +414,47 @@ func buildSentinelCacheForYear(yearDir string) (*TileCache, error) {
 		safePath := filepath.Join(yearDir, ent.Name())
 		dateOnly, capturedAt, tileID, sceneID, err := parseSAFEName(ent.Name())
 		if err != nil {
-			log.Printf("index skip SAFE=%s reason=%v", safePath, err)
 			skipped++
 			continue
 		}
 		imgData, err := findIMGData(safePath)
 		if err != nil {
-			log.Printf("index skip SAFE=%s reason=%v", safePath, err)
 			skipped++
 			continue
 		}
 		cloud, err := readTileCloud(filepath.Join(safePath, "MTD_MSIL1C.xml"))
 		if err != nil {
-			log.Printf("index skip SAFE=%s reason=%v", safePath, err)
+			skipped++
+			continue
+		}
+		ok, err := shouldIndexByB02Size(imgData, 70000000)
+		if err != nil {
+			skipped++
+			continue
+		}
+		if !ok {
 			skipped++
 			continue
 		}
 		jp2, err := firstJP2InDir(imgData)
 		if err != nil {
-			log.Printf("index skip SAFE=%s reason=%v", safePath, err)
 			skipped++
 			continue
 		}
 		env, err := envelopeWGS84FromJP2(jp2)
 		if err != nil {
-			log.Printf("index skip SAFE=%s reason=%v", safePath, err)
 			skipped++
 			continue
 		}
-		footprint, err := footprintWKTFromJP2(jp2)
-		if err != nil {
-			log.Printf("index footprint fallback SAFE=%s reason=%v", safePath, err)
-		}
 		cache.Tiles = append(cache.Tiles, SafeTileEntry{
-			Date:         dateOnly,
-			CapturedAt:   capturedAt,
-			SceneID:      sceneID,
-			SafeName:     ent.Name(),
-			ImgDataPath:  imgData,
-			Cloud:        cloud,
-			Envelope:     env,
-			FootprintWKT: footprint,
-			TileID:       tileID,
+			Date:        dateOnly,
+			CapturedAt:  capturedAt,
+			SceneID:     sceneID,
+			SafeName:    ent.Name(),
+			ImgDataPath: imgData,
+			Cloud:       cloud,
+			Envelope:    env,
+			TileID:      tileID,
 		})
 		indexed++
 	}
@@ -365,6 +463,67 @@ func buildSentinelCacheForYear(yearDir string) (*TileCache, error) {
 		cache.Year = y.Year()
 	}
 	log.Printf("index year=%s indexed=%d skipped=%d final=%d", yearName, indexed, skipped, len(cache.Tiles))
+	return cache, nil
+}
+
+func buildSentinel2ACacheForYear(yearDir string) (*TileCache, error) {
+	yearName := filepath.Base(yearDir)
+	cache := &TileCache{Version: 9, Preprocess: "sentinel2a", Generated: time.Now().Format(time.RFC3339), Tiles: make([]SafeTileEntry, 0, 256)}
+	entries, err := os.ReadDir(yearDir)
+	if err != nil {
+		return nil, err
+	}
+	indexed := 0
+	skipped := 0
+	for _, ent := range entries {
+		if !ent.IsDir() || !strings.HasSuffix(ent.Name(), ".SAFE") {
+			continue
+		}
+		safePath := filepath.Join(yearDir, ent.Name())
+		dateOnly, capturedAt, tileID, sceneID, err := parseSAFEName(ent.Name())
+		if err != nil {
+			skipped++
+			continue
+		}
+		imgData, err := findIMGData(safePath)
+		if err != nil {
+			skipped++
+			continue
+		}
+		meta, err := readL2AMetadata(filepath.Join(safePath, "MTD_MSIL2A.xml"))
+		if err != nil {
+			skipped++
+			continue
+		}
+		jp2, err := firstJP2InDir(imgData)
+		if err != nil {
+			skipped++
+			continue
+		}
+		env, err := envelopeWGS84FromJP2(jp2)
+		if err != nil {
+			skipped++
+			continue
+		}
+		nodata := meta.Nodata
+		cache.Tiles = append(cache.Tiles, SafeTileEntry{
+			Date:                  dateOnly,
+			CapturedAt:            capturedAt,
+			SceneID:               sceneID,
+			SafeName:              ent.Name(),
+			ImgDataPath:           imgData,
+			Cloud:                 meta.Cloud,
+			NodataPixelPercentage: &nodata,
+			Envelope:              env,
+			TileID:                tileID,
+		})
+		indexed++
+	}
+	cache.Tiles, _ = dedupeTiles(cache.Tiles)
+	if y, err := time.Parse("2006", yearName); err == nil {
+		cache.Year = y.Year()
+	}
+	log.Printf("index L2A year=%s indexed=%d skipped=%d final=%d", yearName, indexed, skipped, len(cache.Tiles))
 	return cache, nil
 }
 
@@ -493,13 +652,15 @@ func pruneResults(resultsFile, resultsPath string, days int) error {
 			out = append(out, v)
 		}
 		doc = out
+	default:
+		return fmt.Errorf("unsupported results JSON root type: %T", doc)
 	}
 
-	buf, err := json.Marshal(doc)
+	updated, err := json.Marshal(doc)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(resultsFile, buf, 0o644); err != nil {
+	if err := os.WriteFile(resultsFile, updated, 0o644); err != nil {
 		return err
 	}
 	log.Printf("results cleanup completed: removed=%d cutoff=%s", removed, cutoff.Format(time.RFC3339))
@@ -507,49 +668,64 @@ func pruneResults(resultsFile, resultsPath string, days int) error {
 }
 
 func main() {
-	configPath := flag.String("config", defaultConfigPath(), "Путь к config.json")
-	year := flag.String("year", "", "Год индексации (например 2025) или all для всех годов")
-	days := flag.Int("days", 30, "Удалять результаты старше этого количества дней")
+	configPath := flag.String("config", defaultConfigPath(), "path to config.json")
+	yearArg := flag.String("year", time.Now().Format("2006"), "year to index: YYYY or all")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	logFile, err := setupLogger(cfg.Logs)
+	lf, err := setupLogger(cfg.Logs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	defer logFile.Close()
+	defer lf.Close()
 
-	log.Printf("cron started: year=%s days=%d config=%s sentinel=%s results=%s results_path=%s", strings.TrimSpace(*year), *days, *configPath, cfg.Sentinel, cfg.ResultsFile, cfg.ResultsPath)
-	yearDirs, err := collectYearDirs(cfg.Sentinel, *year)
+	log.Printf("cron started")
+
+	yearDirs, err := collectYearDirs(cfg.Sentinel, *yearArg)
 	if err != nil {
-		log.Printf("index configuration error: %v", err)
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		log.Fatal(err)
 	}
-
 	for _, yearDir := range yearDirs {
 		cache, err := buildSentinelCacheForYear(yearDir)
 		if err != nil {
-			log.Printf("index year failed: dir=%s err=%v", yearDir, err)
+			log.Printf("index error: %v", err)
 			continue
 		}
-		out := filepath.Join(yearDir, "cash.json")
-		if err := writeCache(out, cache); err != nil {
-			log.Printf("cash write failed: path=%s err=%v", out, err)
+		cashPath := filepath.Join(yearDir, "cash.json")
+		if err := writeCache(cashPath, cache); err != nil {
+			log.Printf("cash write error: %v", err)
 			continue
 		}
-		log.Printf("cash written: path=%s tiles=%d", out, len(cache.Tiles))
+		log.Printf("cash written: path=%s tiles=%d preprocess=%s", cashPath, len(cache.Tiles), cache.Preprocess)
 	}
 
-	if err := pruneResults(cfg.ResultsFile, cfg.ResultsPath, *days); err != nil {
-		log.Printf("results cleanup failed: %v", err)
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(3)
+	if strings.TrimSpace(cfg.Sentinel2A) != "" {
+		yearDirsL2A, err := collectYearDirs(cfg.Sentinel2A, *yearArg)
+		if err != nil {
+			log.Printf("index L2A skipped: %v", err)
+		} else {
+			for _, yearDir := range yearDirsL2A {
+				cache, err := buildSentinel2ACacheForYear(yearDir)
+				if err != nil {
+					log.Printf("index L2A error: %v", err)
+					continue
+				}
+				cashPath := filepath.Join(yearDir, "cash.json")
+				if err := writeCache(cashPath, cache); err != nil {
+					log.Printf("cash write error: %v", err)
+					continue
+				}
+				log.Printf("cash written: path=%s tiles=%d preprocess=%s", cashPath, len(cache.Tiles), cache.Preprocess)
+			}
+		}
 	}
+
+	if err := pruneResults(cfg.ResultsFile, cfg.ResultsPath, 30); err != nil {
+		log.Printf("results cleanup error: %v", err)
+	}
+
 	log.Printf("cron finished")
 }

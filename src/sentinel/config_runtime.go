@@ -13,6 +13,7 @@ type AppConfig struct {
 	Logs         string
 	Satellite    string
 	Sentinel     string
+	Sentinel2A   string
 	Tmp          string
 	Users        string
 	PoliPath     string
@@ -33,6 +34,7 @@ type rawPaths struct {
 	Logs         string `json:"logs"`
 	Satellite    string `json:"satellite"`
 	Sentinel     string `json:"sentinel"`
+	Sentinel2A   string `json:"sentinel2A"`
 	Tmp          string `json:"tmp"`
 	Users        string `json:"users"`
 	PoliPath     string `json:"poli_path"`
@@ -71,6 +73,7 @@ func LoadAppConfig(path string) (*AppConfig, error) {
 		Logs:         rp.Logs,
 		Satellite:    rp.Satellite,
 		Sentinel:     rp.Sentinel,
+		Sentinel2A:   rp.Sentinel2A,
 		Tmp:          rp.Tmp,
 		Users:        rp.Users,
 		PoliPath:     rp.PoliPath,
@@ -106,8 +109,13 @@ func LoadAppConfig(path string) (*AppConfig, error) {
 			spec.Name = key
 		}
 		spec = FinalizeSpec(spec)
-		if spec.Preprocess != "sentinel" {
+		mode := strings.ToLower(strings.TrimSpace(spec.Preprocess))
+		if mode != "sentinel" && mode != "sentinel2a" && mode != "identity" && mode != "pathology" && mode != "pathology_diff" {
 			continue
+		}
+		spec.Preprocess = mode
+		if err := ValidateSpec(spec); err != nil {
+			return nil, fmt.Errorf("config validation: %w", err)
 		}
 		filtered[key] = spec
 	}

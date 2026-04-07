@@ -38,8 +38,8 @@ import (
 	"unsafe"
 )
 
-// PolygonizeMaskToShapefile converts a 1-band mask GeoTIFF (values 0/1) into a shapefile.
-// It keeps only DN==1 polygons, optionally filtering by minArea (map units^2) and simplifying.
+// PolygonizeMaskToShapefile converts a 1-band mask GeoTIFF into a shapefile.
+// It keeps only DN > 0 polygons, optionally filtering by minArea and simplifying.
 func PolygonizeMaskToShapefile(maskTif string, outShp string, minArea float64, simplifyTol float64) error {
 	C._gdal_init_once()
 
@@ -91,12 +91,11 @@ func PolygonizeMaskToShapefile(maskTif string, outShp string, minArea float64, s
 		srs = C.OSRNewSpatialReference(nil)
 		wkt := C.CString(C.GoString(proj))
 		defer C.free(unsafe.Pointer(wkt))
-		// OSRImportFromWkt takes char**
 		pwkt := wkt
 		C.OSRImportFromWkt(srs, (**C.char)(unsafe.Pointer(&pwkt)))
 	}
 
-	layerName := C.CString("hogweed")
+	layerName := C.CString("result")
 	defer C.free(unsafe.Pointer(layerName))
 	layer := C.OGR_DS_CreateLayer(ods, layerName, srs, C.wkbPolygon, nil)
 	if layer == nil {
@@ -110,7 +109,9 @@ func PolygonizeMaskToShapefile(maskTif string, outShp string, minArea float64, s
 	}
 
 	// Field DN (integer)
-	fd := C.OGR_Fld_Create(C.CString("DN"), C.OFTInteger)
+	fieldName := C.CString("DN")
+	defer C.free(unsafe.Pointer(fieldName))
+	fd := C.OGR_Fld_Create(fieldName, C.OFTInteger)
 	if fd == nil {
 		return errors.New("failed to create field def")
 	}
@@ -118,55 +119,106 @@ func PolygonizeMaskToShapefile(maskTif string, outShp string, minArea float64, s
 	if C.OGR_L_CreateField(layer, fd, 1) != 0 {
 		return errors.New("failed to create DN field")
 	}
-	fieldIndex := C.int(0)
 
-	// Polygonize
-	if C.GDALPolygonize(band, nil, layer, fieldIndex, nil, nil, nil) != 0 {
+	// Polygonize во временный in-memory слой.
+	memDrvName := C.CString("Memory")
+	defer C.free(unsafe.Pointer(memDrvName))
+	memDrv := C.OGRGetDriverByName(memDrvName)
+	if memDrv == nil {
+		return errors.New("OGR Memory driver not found")
+	}
+
+	memDSName := C.CString("tmp_poly")
+	defer C.free(unsafe.Pointer(memDSName))
+	memDS := C.OGR_Dr_CreateDataSource(memDrv, memDSName, nil)
+	if memDS == nil {
+		return errors.New("failed to create in-memory datasource")
+	}
+	defer C.OGR_DS_Destroy(memDS)
+
+	tmpLayerName := C.CString("poly")
+	defer C.free(unsafe.Pointer(tmpLayerName))
+	tmpLayer := C.OGR_DS_CreateLayer(memDS, tmpLayerName, nil, C.wkbPolygon, nil)
+	if tmpLayer == nil {
+		return errors.New("failed to create temp layer")
+	}
+
+	tmpFieldName := C.CString("DN")
+	defer C.free(unsafe.Pointer(tmpFieldName))
+	tmpFd := C.OGR_Fld_Create(tmpFieldName, C.OFTInteger)
+	if tmpFd == nil {
+		return errors.New("failed to create temp DN field")
+	}
+	defer C.OGR_Fld_Destroy(tmpFd)
+
+	if C.OGR_L_CreateField(tmpLayer, tmpFd, 1) != 0 {
+		return errors.New("failed to create temp DN field")
+	}
+	tmpFieldIndex := C.int(0)
+
+	if C.GDALPolygonize(band, nil, tmpLayer, tmpFieldIndex, nil, nil, nil) != 0 {
 		return errors.New("GDALPolygonize failed")
 	}
 
-	// Post-process: keep DN==1, filter by area, simplify.
-	C.OGR_L_ResetReading(layer)
+	// Копируем только DN > 0 с фильтрацией площади и simplify.
+	outDefn := C.OGR_L_GetLayerDefn(layer)
+	C.OGR_L_ResetReading(tmpLayer)
+
 	for {
-		feat := C.OGR_L_GetNextFeature(layer)
+		feat := C.OGR_L_GetNextFeature(tmpLayer)
 		if feat == nil {
 			break
 		}
-		fid := C.OGR_F_GetFID(feat)
-		dn := C.OGR_F_GetFieldAsInteger(feat, fieldIndex)
-		geom := C.OGR_F_GetGeometryRef(feat)
-		remove := false
-		if dn != 1 {
-			remove = true
-		} else if geom != nil && minArea > 0 {
-			area := float64(C.OGR_G_Area(geom))
-			if area < minArea {
-				remove = true
-			}
-		}
-		if remove {
+
+		dn := int(C.OGR_F_GetFieldAsInteger(feat, tmpFieldIndex))
+		if dn <= 0 {
 			C.OGR_F_Destroy(feat)
-			C.OGR_L_DeleteFeature(layer, fid)
 			continue
 		}
-		if geom != nil && simplifyTol > 0 {
-			newGeom := C.OGR_G_Simplify(geom, C.double(simplifyTol))
-			if newGeom != nil {
-				C.OGR_F_SetGeometryDirectly(feat, newGeom)
-				C.OGR_L_SetFeature(layer, feat)
+
+		geom := C.OGR_F_GetGeometryRef(feat)
+		if geom == nil {
+			C.OGR_F_Destroy(feat)
+			continue
+		}
+
+		if minArea > 0 {
+			area := float64(C.OGR_G_Area(geom))
+			if area < minArea {
+				C.OGR_F_Destroy(feat)
+				continue
 			}
+		}
+
+		var outGeom C.OGRGeometryH = geom
+		if simplifyTol > 0 {
+			newGeom := C.OGR_G_SimplifyPreserveTopology(geom, C.double(simplifyTol))
+			if newGeom != nil {
+				outGeom = newGeom
+			}
+		}
+
+		outFeat := C.OGR_F_Create(outDefn)
+		if outFeat != nil {
+			C.OGR_F_SetFieldInteger(outFeat, 0, C.int(dn))
+			C.OGR_F_SetGeometry(outFeat, outGeom)
+			C.OGR_L_CreateFeature(layer, outFeat)
+			C.OGR_F_Destroy(outFeat)
+		}
+
+		if outGeom != geom {
+			C.OGR_G_DestroyGeometry(outGeom)
 		}
 		C.OGR_F_Destroy(feat)
 	}
 
-	// Flush
 	C.OGR_DS_SyncToDisk(ods)
 	return nil
 }
 
 // PolygonizeMask converts a temporary mask raster into a temporary shapefile and returns its .shp path.
 func PolygonizeMask(maskTif string, classValue int, minArea float64, simplifyTol float64) (string, error) {
-	_ = classValue // current implementation polygonizes full binary mask and keeps DN==1
+	_ = classValue
 	shp := strings.TrimSuffix(maskTif, filepath.Ext(maskTif)) + ".shp"
 	if err := PolygonizeMaskToShapefile(maskTif, shp, minArea, simplifyTol); err != nil {
 		return "", err

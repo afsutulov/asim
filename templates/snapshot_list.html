@@ -14,7 +14,7 @@
     {% if parent %}<a class="ghost-link" href="{{ parent }}">← На уровень выше</a>{% endif %}
     <div class="files-grid snapshot-grid">
       {% for entry in entries %}
-        <a href="{{ entry.link }}" class="file-item">
+        <a href="{{ entry.link }}" class="file-item" {% if entry.is_dir %} target="_self" {% else %} target="_top" download {% endif %}>
           <div class="file-icon">{{ '📁' if entry.is_dir else '📄' }}</div>
           <div class="file-name">{{ entry.name }}</div>
           {% if not entry.is_dir %}<div class="muted">{{ entry.size }} байт</div>{% endif %}

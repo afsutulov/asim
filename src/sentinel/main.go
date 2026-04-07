@@ -10,9 +10,8 @@ import (
 )
 
 func printUsage(configPath string) {
-	fmt.Fprintln(os.Stderr, "Sentinel Object Monitor (sentinel)")
 	fmt.Fprintln(os.Stderr, "ГБУ ПК \"Центр информационного развития Пермского края\". 2026 год")
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Модуль поиска объектов по спутниковым снимкам Sentinel2 L1C\n")
 	fmt.Fprintf(os.Stderr, "Пример: ./sentinel --config %s --model hogweed --start 2025-06-11 --end 2025-06-20 --out run1\n", configPath)
 	fmt.Fprintln(os.Stderr, "Для моделей с inputs=2 дополнительно задаются --start2 и --end2")
 }
@@ -80,14 +79,20 @@ func main() {
 	simplifyFlag := flag.Float64("simplify", 0, "Упрощение геометрии (если 0, берется из модели)")
 	device := flag.String("device", "cuda", "Тип расчетов: cpu|cuda")
 	cudaID := flag.Int("cuda-device", 0, "Номер GPU для ONNX Runtime")
-	batch := flag.Int("batch", 16, "Сколько тайлов обрабатывается за один вызов модели")
+	batch := flag.Int("batch", 4, "Сколько тайлов обрабатывается за один вызов модели")
 	start := flag.String("start", "", "Начало периода YYYY-MM-DD")
 	end := flag.String("end", "", "Конец периода YYYY-MM-DD")
 	start2 := flag.String("start2", "", "Начало второго периода YYYY-MM-DD")
 	end2 := flag.String("end2", "", "Конец второго периода YYYY-MM-DD")
 	cloud := flag.Float64("cloud", 50, "Максимальная облачность тайла в процентах (в анализ попадают снимки с облачностью <= этого значения)")
-	poligon := flag.String("poligon", "krai", "Идентификатор полигона поиска из config.json")
+	poligon := flag.String("poligon", "kray", "Идентификатор полигона поиска из config.json")
+	dumpPatchDir := flag.String("dump-patch", "", "Каталог для сохранения диагностического дампа первого патча (вход+выход модели)")
 	flag.Parse()
+
+	// Устанавливаем каталог дампа (глобальная переменная из dump.go).
+	if strings.TrimSpace(*dumpPatchDir) != "" {
+		dumpDir = strings.TrimSpace(*dumpPatchDir)
+	}
 
 	cfg, err := LoadAppConfig(*configPath)
 	if err != nil {
@@ -96,10 +101,6 @@ func main() {
 		os.Exit(1)
 	}
 	SetModelSpecs(cfg.Models)
-
-	if strings.TrimSpace(*cashPath) == "" {
-		*cashPath = cfg.Sentinel
-	}
 
 	logFile, err := initLogger(cfg.Logs)
 	if err != nil {
@@ -139,6 +140,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Неизвестная модель. Доступные модели:", strings.Join(ListModelNames(), ", "))
 		os.Exit(2)
 	}
+	if strings.TrimSpace(*cashPath) == "" {
+		if strings.EqualFold(spec.Preprocess, "sentinel2a") && strings.TrimSpace(cfg.Sentinel2A) != "" {
+			*cashPath = cfg.Sentinel2A
+		} else {
+			*cashPath = cfg.Sentinel
+		}
+	}
+
 	if spec.Inputs > 1 && (*start2 == "" || *end2 == "") {
 		fmt.Fprintf(os.Stderr, "Модель %s требует --start2 и --end2\n", spec.Name)
 		os.Exit(2)

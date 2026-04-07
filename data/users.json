@@ -38,5 +38,10 @@
     "name": "Виктория Сергеевна Мизева, Минприроды",
     "group": "satellite",
     "password": "$6$bcbu2TPATnVYet9q$aWwA35vJdtlIBwhmJRKWmYdo9EZbA2QMjTTfnWtHR6p6PtZcB6plM7MBbRBlslaCAmspb0BMpABIZQ82HRcgI1"
+  },
+  "eskurguzova": {
+    "name": "Екатерина Кургузова",
+    "group": "user",
+    "password": "$6$WPdhRoxWBRcSN1Hu$R3YE88Mht.PayBszRmE1MdItvDiK9Hh6pFQdI.kUyEXwuw17b2b2LgqkP/5I069VUnOg4y9VISbhO3Akaf4sj/"
   }
 }

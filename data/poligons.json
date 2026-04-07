@@ -1,14 +1,18 @@
 {
   "kray": {
-    "name": "Пермский край",
+    "name": " Пермский край",
     "public": 1
   },
   "perm": {
-    "name": "г. Пермь (Пермский ГО)",
+    "name": " Пермь (Пермский ГО)",
     "public": 1
   },
   "permsky": {
-    "name": "Пермский МО",
+    "name": " Пермский МО",
+    "public": 1
+  },
+  "aleksandrovsky": {
+    "name": "Александровский МО",
     "public": 1
   },
   "bardimsky": {
@@ -17,6 +21,10 @@
   },
   "berezovsky": {
     "name": "Березовский МО",
+    "public": 1
+  },
+  "berezniki": {
+    "name": "Березниковский ГО",
     "public": 1
   },
   "bolshesosnovsky": {
@@ -35,8 +43,20 @@
     "name": "Горнозаводский МО",
     "public": 1
   },
+  "gubahinsky": {
+    "name": "Губахинский МО",
+    "public": 1
+  },
+  "dobryansky": {
+    "name": "Добрянский МО",
+    "public": 1
+  },
   "elovsky": {
     "name": "Еловский МО",
+    "public": 1
+  },
+  "zvesdniy": {
+    "name": "ЗАТО Звездный",
     "public": 1
   },
   "ilinsky": {
@@ -45,6 +65,10 @@
   },
   "karagaysky": {
     "name": "Карагайский МО",
+    "public": 1
+  },
+  "kizelovsky": {
+    "name": "Кизеловский МО",
     "public": 1
   },
   "kishersky": {
@@ -63,6 +87,10 @@
     "name": "Красновишерский МО",
     "public": 1
   },
+  "krasnokamsky": {
+    "name": "Краснокамский МО",
+    "public": 1
+  },
   "kudimkarsky": {
     "name": "Кудымкарский МО",
     "public": 1
@@ -73,6 +101,10 @@
   },
   "kungugsky": {
     "name": "Кунгурский МО",
+    "public": 1
+  },
+  "lisvensky": {
+    "name": "Лысьвенский МО",
     "public": 1
   },
   "nitvensky": {
@@ -115,12 +147,12 @@
     "name": "Уинский МО",
     "public": 1
   },
-  "usolsky": {
-    "name": "Усольский МО",
-    "public": 1
-  },
   "chastinsky": {
     "name": "Частинский МО",
+    "public": 1
+  },
+  "chaykovsky": {
+    "name": "Чайковский ГО",
     "public": 1
   },
   "cherdinsky": {
@@ -131,8 +163,12 @@
     "name": "Чернушенский МО",
     "public": 1
   },
-  "yurlensky": {
-    "name": "Юрленский МО",
+  "chusovskoy": {
+    "name": "Чусовской МО",
+    "public": 1
+  },
+  "yurlinsky": {
+    "name": "Юрлинский МО",
     "public": 1
   },
   "usvensky": {
@@ -147,12 +183,8 @@
     "name": "Arable test",
     "public": 2
   },
-  "zvesdniy": {
-    "name": "ЗАТО Звездный",
-    "public": 1
-  },
-  "dobryansky": {
-    "name": "Добрянский МО",
-    "public": 1
+  "naspunkti": {
+    "name": "Населенные пункты",
+    "public": 0
   }
 }

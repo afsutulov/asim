@@ -7,6 +7,7 @@ import (
     "errors"
     "flag"
     "fmt"
+    "io/fs"
     "log"
     "math"
     "os"
@@ -16,14 +17,29 @@ import (
     "sort"
     "strconv"
     "strings"
+    "sync"
     "time"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Конфигурация и типы
+// ─────────────────────────────────────────────────────────────────────────────
+
 type Config struct {
     Sentinel    string `json:"sentinel"`
+    Sentinel2A  string `json:"sentinel2A"`
     ResultsPath string `json:"results_path"`
     Logs        string `json:"logs"`
     Tmp         string `json:"tmp"`
+}
+
+// sentinelRoot возвращает путь к каталогу со снимками L2A.
+// Поле sentinel2A приоритетно; если пусто — fallback на sentinel.
+func (c *Config) sentinelRoot() string {
+    if strings.TrimSpace(c.Sentinel2A) != "" {
+	return c.Sentinel2A
+    }
+    return c.Sentinel
 }
 
 type TileCache struct {
@@ -35,14 +51,15 @@ type TileCache struct {
 }
 
 type SafeTileEntry struct {
-    Date        string     `json:"date"`
-    CapturedAt  string     `json:"captured_at,omitempty"`
-    SceneID     string     `json:"scene_id,omitempty"`
-    SafeName    string     `json:"safe_name,omitempty"`
-    ImgDataPath string     `json:"img_data_path"`
-    Cloud       float64    `json:"cloud"`
-    Envelope    [4]float64 `json:"envelope"`
-    TileID      string     `json:"tile_id"`
+    Date          string     `json:"date"`
+    CapturedAt    string     `json:"captured_at,omitempty"`
+    SceneID       string     `json:"scene_id,omitempty"`
+    SafeName      string     `json:"safe_name,omitempty"`
+    ImgDataPath   string     `json:"img_data_path"`
+    Cloud         float64    `json:"cloud"`
+    NodataPercent float64    `json:"nodata_pixel_percentage"`
+    Envelope      [4]float64 `json:"envelope"`
+    TileID        string     `json:"tile_id"`
 }
 
 type bandStats struct {
@@ -66,19 +83,22 @@ type tileCandidate struct {
 }
 
 type tileSelection struct {
-    TileID      string
-    Entry       SafeTileEntry
-    CapturedAt  time.Time
-    Threshold   int
-    Cloud       float64
-    SourcePath  string
-    SourceKind  string // TCI or RGB
-    RGBVRT      string
-    NormTIF     string
-    WarpedTIF   string
-    Stats       [3]bandStats
-    SourceReady bool
+    TileID     string
+    Entry      SafeTileEntry
+    CapturedAt time.Time
+    CloudLimit float64
+    Cloud      float64
+    SourcePath string
+    SourceKind string
+    RGBVRT     string
+    NormTIF    string
+    WarpedTIF  string
+    Stats      [3]bandStats
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Список тайлов Пермского края (не меняется)
+// ─────────────────────────────────────────────────────────────────────────────
 
 var tiles = []string{
     "39VWJ", "39VXJ", "40VCP", "40VDP", "40VEP", "40VFP",
@@ -90,63 +110,69 @@ var tiles = []string{
     "39VWC", "39VXC", "40VCH", "40VDH", "40VEH", "40VFH",
 }
 
-var bandPatterns = map[string][]string{
-    "B04": {`(?i)_B04(?:_10m)?\.jp2$`, `(?i)B04\.jp2$`},
-    "B03": {`(?i)_B03(?:_10m)?\.jp2$`, `(?i)B03\.jp2$`},
-    "B02": {`(?i)_B02(?:_10m)?\.jp2$`, `(?i)B02\.jp2$`},
+// ─────────────────────────────────────────────────────────────────────────────
+// Паттерны для поиска каналов R10m в структуре L2A
+//
+// Sentinel-2 L2A R10m:
+//   GRANULE/<tile>/IMG_DATA/R10m/
+//     T40VEP_20250601T081531_B04_10m.jp2
+//     T40VEP_20250601T081531_B03_10m.jp2
+//     T40VEP_20250601T081531_B02_10m.jp2
+//     T40VEP_20250601T081531_TCI_10m.jp2
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bandPatterns = map[string][]*regexp.Regexp{
+    "B04": {
+	regexp.MustCompile(`(?i)_B04_10m\.jp2$`),
+	regexp.MustCompile(`(?i)_B04\.jp2$`),
+    },
+    "B03": {
+	regexp.MustCompile(`(?i)_B03_10m\.jp2$`),
+	regexp.MustCompile(`(?i)_B03\.jp2$`),
+    },
+    "B02": {
+	regexp.MustCompile(`(?i)_B02_10m\.jp2$`),
+	regexp.MustCompile(`(?i)_B02\.jp2$`),
+    },
 }
 
-var tciPatterns = []string{
-    `(?i)_TCI(?:_10m)?\.jp2$`,
-    `(?i)TCI\.jp2$`,
+var tciRegexps = []*regexp.Regexp{
+    regexp.MustCompile(`(?i)_TCI_10m\.jp2$`),
+    regexp.MustCompile(`(?i)_TCI\.jp2$`),
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// main / run
+// ─────────────────────────────────────────────────────────────────────────────
 
 func main() {
     configPath := flag.String("config", filepath.Join("data", "config.json"), "path to config.json")
-    startArg := flag.String("start", "", "start date in format YYYY-MM-DD")
-    endArg := flag.String("end", "", "end date in format YYYY-MM-DD")
+    startArg := flag.String("start", "", "start date YYYY-MM-DD")
+    endArg := flag.String("end", "", "end date YYYY-MM-DD")
     outName := flag.String("out", "", "output file name without extension")
     keepTmp := flag.Bool("keep-tmp", false, "keep temporary working directory")
-    targetSRS := flag.String("t-srs", "EPSG:3857", "target projection for warped mosaic")
-    pixelSize := flag.Float64("tr", 10.0, "target pixel size in map units")
-    gdalCacheMB := flag.Int("gdal-cache-mb", 256, "GDAL cache size in MB")
-    warpMemMB := flag.Int("warp-mem-mb", 256, "gdalwarp working memory in MB")
-    threads := flag.Int("threads", 1, "number of threads for GDAL/OMP")
+    targetSRS := flag.String("t-srs", "EPSG:3857", "target projection")
+    pixelSize := flag.Float64("tr", 20.0, "target pixel size in map units (default 20m)")
+    gdalCacheMB := flag.Int("gdal-cache-mb", 512, "GDAL cache size MB")
+    warpMemMB := flag.Int("warp-mem-mb", 512, "gdalwarp working memory MB")
+    threads := flag.Int("threads", 4, "number of threads for GDAL")
     flag.Parse()
 
-    err := run(
-	*configPath,
-	*startArg,
-	*endArg,
-	*outName,
-	*keepTmp,
-	*targetSRS,
-	*pixelSize,
-	*gdalCacheMB,
-	*warpMemMB,
-	*threads,
-    )
-    if err != nil {
+    if err := run(*configPath, *startArg, *endArg, *outName, *keepTmp,
+	*targetSRS, *pixelSize, *gdalCacheMB, *warpMemMB, *threads); err != nil {
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
     }
 }
 
-func run(
-    configPath, startArg, endArg, outName string,
-    keepTmp bool,
-    targetSRS string,
-    pixelSize float64,
-    gdalCacheMB, warpMemMB, threads int,
-) error {
+func run(configPath, startArg, endArg, outName string, keepTmp bool,
+    targetSRS string, pixelSize float64, gdalCacheMB, warpMemMB, threads int) error {
+
     if strings.TrimSpace(startArg) == "" || strings.TrimSpace(endArg) == "" {
 	return errors.New("both --start and --end are required")
     }
     if strings.TrimSpace(outName) == "" {
 	return errors.New("--out is required")
-    }
-    if pixelSize <= 0 {
-	return errors.New("--tr must be > 0")
     }
 
     start, err := time.Parse("2006-01-02", startArg)
@@ -158,7 +184,7 @@ func run(
 	return fmt.Errorf("invalid --end: %w", err)
     }
     if end.Before(start) {
-	return errors.New("--end must be greater than or equal to --start")
+	return errors.New("--end must be >= --start")
     }
 
     cfg, err := loadConfig(configPath)
@@ -169,91 +195,571 @@ func run(
     if err := os.MkdirAll(cfg.Logs, 0o755); err != nil {
 	return fmt.Errorf("create logs dir: %w", err)
     }
-    logFile, err := os.OpenFile(filepath.Join(cfg.Logs, "mosaic.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+    logFile, err := os.OpenFile(filepath.Join(cfg.Logs, "mosaic.log"),
+	os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
     if err != nil {
 	return fmt.Errorf("open mosaic.log: %w", err)
     }
     defer logFile.Close()
-
     log.SetOutput(logFile)
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-    setProcessEnvLimits(gdalCacheMB, threads)
+    setGDALEnv(gdalCacheMB, threads)
 
-    log.Printf("mosaic started config=%s start=%s end=%s out=%s t_srs=%s tr=%.3f",
-	configPath, start.Format("2006-01-02"), end.Format("2006-01-02"), outName, targetSRS, pixelSize)
-    log.Printf("config sentinel=%s results_path=%s logs=%s tmp=%s",
-	cfg.Sentinel, cfg.ResultsPath, cfg.Logs, cfg.Tmp)
-    log.Printf("resource limits: GDAL_CACHEMAX=%dMB warpMem=%dMB threads=%d",
-	gdalCacheMB, warpMemMB, threads)
+    log.Printf("mosaic L2A start=%s end=%s out=%s srs=%s tr=%.1f cache=%dMB warp=%dMB threads=%d",
+	startArg, endArg, outName, targetSRS, pixelSize, gdalCacheMB, warpMemMB, threads)
 
     if err := requireExecutables("gdalinfo", "gdalbuildvrt", "gdal_translate", "gdalwarp"); err != nil {
 	return err
     }
-    if err := os.MkdirAll(cfg.ResultsPath, 0o755); err != nil {
-	return fmt.Errorf("create results_path: %w", err)
-    }
-    if err := os.MkdirAll(cfg.Tmp, 0o755); err != nil {
-	return fmt.Errorf("create tmp dir: %w", err)
+    for _, d := range []string{cfg.ResultsPath, cfg.Tmp} {
+	if err := os.MkdirAll(d, 0o755); err != nil {
+	    return fmt.Errorf("mkdir %s: %w", d, err)
+	}
     }
 
-    selections, err := selectBestScenesByCloud(cfg.Sentinel, start, end)
+    // 1. Выбор снимков: NODATA_PIXEL_PERCENTAGE=0, адаптивный порог облачности
+    selections, err := selectScenes(cfg.sentinelRoot(), start, end)
     if err != nil {
 	return err
     }
-    log.Printf("selected %d tile scenes", len(selections))
+    log.Printf("selected %d tiles", len(selections))
 
     workDir, err := os.MkdirTemp(cfg.Tmp, "mosaic-*")
     if err != nil {
-	return fmt.Errorf("create temp dir in %s: %w", cfg.Tmp, err)
+	return fmt.Errorf("mkdirtemp: %w", err)
     }
-    if !keepTmp {
-	defer os.RemoveAll(workDir)
-    }
-    log.Printf("working directory=%s", workDir)
+    log.Printf("workDir=%s", workDir)
 
+    // 2. Поиск исходных файлов R10m (TCI_10m или B04/B03/B02)
     for i := range selections {
-	if err := prepareTileInputs(workDir, &selections[i]); err != nil {
+	if err := findTileSource(&selections[i], workDir); err != nil {
 	    return err
 	}
     }
 
-    globalScale := computeGlobalScale(selections)
-    log.Printf("global scale R=[%.3f..%.3f] G=[%.3f..%.3f] B=[%.3f..%.3f]",
-	globalScale[0].SrcMin, globalScale[0].SrcMax,
-	globalScale[1].SrcMin, globalScale[1].SrcMax,
-	globalScale[2].SrcMin, globalScale[2].SrcMax,
-    )
-
+    // 3. Статистика (быстрый approx через уменьшенную копию)
     for i := range selections {
-	if err := normalizeTileWithGlobalScale(workDir, &selections[i], globalScale); err != nil {
-	    return err
+	stats, err := collectApproxStats(selections[i].SourcePath)
+	if err != nil {
+	    return fmt.Errorf("stats tile=%s: %w", selections[i].TileID, err)
 	}
-	if err := warpTileToCommonGrid(workDir, &selections[i], targetSRS, pixelSize, warpMemMB); err != nil {
-	    return err
-	}
+	selections[i].Stats = stats
+	log.Printf("stats tile=%s R[%.0f..%.0f] G[%.0f..%.0f] B[%.0f..%.0f]",
+	    selections[i].TileID,
+	    stats[0].Min, stats[0].Max,
+	    stats[1].Min, stats[1].Max,
+	    stats[2].Min, stats[2].Max)
+    }
 
+    // 4. Единая глобальная нормализация для бесшовного стыка тайлов
+    scale := computeGlobalScale(selections)
+    log.Printf("global scale R[%.1f..%.1f] G[%.1f..%.1f] B[%.1f..%.1f]",
+	scale[0].SrcMin, scale[0].SrcMax,
+	scale[1].SrcMin, scale[1].SrcMax,
+	scale[2].SrcMin, scale[2].SrcMax)
+
+    // 5. Нормализация + репроекция каждого тайла
+    for i := range selections {
+	if err := normalizeTile(workDir, &selections[i], scale); err != nil {
+	    return err
+	}
+	if err := warpTile(workDir, &selections[i], targetSRS, pixelSize, warpMemMB); err != nil {
+	    return err
+	}
 	if !keepTmp {
-	    if selections[i].NormTIF != "" {
-		_ = os.Remove(selections[i].NormTIF)
-		selections[i].NormTIF = ""
-	    }
-	    if selections[i].RGBVRT != "" {
-		_ = os.Remove(selections[i].RGBVRT)
-		selections[i].RGBVRT = ""
+	    for _, f := range []string{selections[i].NormTIF, selections[i].RGBVRT} {
+		if f != "" {
+		    _ = os.Remove(f)
+		}
 	    }
 	}
     }
 
-    outPath := filepath.Join(cfg.ResultsPath, outName+".jp2")
+    // 6. Сборка мозаики в JP2 — место, формат и структура пути совпадают с L1C
+    year := start.Year()
+    yearDir := filepath.Join(cfg.sentinelRoot(), strconv.Itoa(year))
+    if err := os.MkdirAll(yearDir, 0o755); err != nil {
+	return fmt.Errorf("create year dir: %w", err)
+    }
+    outPath := filepath.Join(yearDir, outName+".jp2")
     if err := buildMosaic(workDir, selections, outPath); err != nil {
 	return err
     }
 
-    log.Printf("mosaic finished successfully: %s", outPath)
+    log.Printf("mosaic done: %s", outPath)
     fmt.Println(outPath)
+
+    if !keepTmp {
+	log.Printf("cleanup: removing workDir=%s", workDir)
+	_ = os.RemoveAll(workDir)
+	log.Printf("cleanup: done")
+    }
     return nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Выбор снимков
+//
+// Алгоритм:
+//   1. Из cash.json берём только записи с NODATA_PIXEL_PERCENTAGE == 0.
+//   2. Начинаем с порога облачности 1%. Если все тайлы покрыты — готово.
+//   3. Если нет — повышаем на 1% (до 100%) пока не покроем все тайлы.
+//   4. Для каждого тайла при данном пороге берём самый свежий снимок.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func selectScenes(sentinelRoot string, start, end time.Time) ([]tileSelection, error) {
+    endInc := end.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+
+    candidatesByTile := make(map[string][]tileCandidate)
+    tileSet := make(map[string]struct{}, len(tiles))
+    for _, t := range tiles {
+	tileSet[t] = struct{}{}
+    }
+
+    for year := start.Year(); year <= end.Year(); year++ {
+	cachePath := filepath.Join(sentinelRoot, strconv.Itoa(year), "cash.json")
+	cache, err := readCache(cachePath)
+	if err != nil {
+	    log.Printf("warn: %v", err)
+	    continue
+	}
+	log.Printf("cache year=%d entries=%d", year, len(cache.Tiles))
+	for _, entry := range cache.Tiles {
+	    tid := normalizeTileID(entry.TileID)
+	    if _, ok := tileSet[tid]; !ok {
+		continue
+	    }
+	    capturedAt, ok := parseCapturedAt(entry)
+	    if !ok {
+		continue
+	    }
+	    if capturedAt.Before(start) || capturedAt.After(endInc) {
+		continue
+	    }
+	    // Обязательное условие: NODATA_PIXEL_PERCENTAGE должен быть равен 0
+	    if entry.NodataPercent != 0 {
+		continue
+	    }
+	    candidatesByTile[tid] = append(candidatesByTile[tid], tileCandidate{
+		TileID:     tid,
+		Entry:      entry,
+		CapturedAt: capturedAt,
+	    })
+	}
+    }
+
+    selected := make(map[string]tileSelection)
+    for cloudLimit := 1.0; cloudLimit <= 100.0; cloudLimit += 1.0 {
+	var stillMissing []string
+	for _, tid := range tiles {
+	    if _, ok := selected[tid]; ok {
+		continue
+	    }
+	    best, ok := pickBestCandidate(candidatesByTile[tid], cloudLimit)
+	    if !ok {
+		stillMissing = append(stillMissing, tid)
+		continue
+	    }
+	    selected[tid] = tileSelection{
+		TileID:     tid,
+		Entry:      best.Entry,
+		CapturedAt: best.CapturedAt,
+		CloudLimit: cloudLimit,
+		Cloud:      best.Entry.Cloud,
+	    }
+	    log.Printf("selected tile=%s cloud=%.1f%% limit=%.0f%% date=%s nodata=%.2f%%",
+		tid, best.Entry.Cloud, cloudLimit,
+		best.CapturedAt.Format("2006-01-02"),
+		best.Entry.NodataPercent)
+	}
+	if len(stillMissing) == 0 {
+	    break
+	}
+	log.Printf("cloud limit %.0f%%: still missing %d tiles: %s",
+	    cloudLimit, len(stillMissing), strings.Join(stillMissing, ", "))
+    }
+
+    var missing []string
+    for _, tid := range tiles {
+	if _, ok := selected[tid]; !ok {
+	    missing = append(missing, tid)
+	}
+    }
+    if len(missing) > 0 {
+	return nil, fmt.Errorf("no scenes found for tiles: %s (period %s..%s)",
+	    strings.Join(missing, ", "), start.Format("2006-01-02"), end.Format("2006-01-02"))
+    }
+
+    out := make([]tileSelection, 0, len(tiles))
+    for _, tid := range tiles {
+	out = append(out, selected[tid])
+    }
+    return out, nil
+}
+
+// pickBestCandidate: среди кандидатов с cloud <= limit — самый свежий.
+// NODATA_PIXEL_PERCENTAGE уже отфильтрован при сборке candidatesByTile.
+func pickBestCandidate(candidates []tileCandidate, cloudLimit float64) (tileCandidate, bool) {
+    var eligible []tileCandidate
+    for _, c := range candidates {
+	if c.Entry.Cloud <= cloudLimit {
+	    eligible = append(eligible, c)
+	}
+    }
+    if len(eligible) == 0 {
+	return tileCandidate{}, false
+    }
+    sort.Slice(eligible, func(i, j int) bool {
+	return eligible[i].CapturedAt.After(eligible[j].CapturedAt)
+    })
+    return eligible[0], true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Поиск исходных файлов R10m
+//
+// В L2A каналы 10m лежат в: GRANULE/<tile>/IMG_DATA/R10m/
+// Ищем TCI_10m.jp2; если нет — строим VRT из B04/B03/B02.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func findTileSource(sel *tileSelection, workDir string) error {
+    imgPath := sel.Entry.ImgDataPath
+    if imgPath == "" {
+	return fmt.Errorf("tile %s: ImgDataPath is empty", sel.TileID)
+    }
+
+    tci, err := findFileRecursive(imgPath, tciRegexps)
+    if err == nil {
+	sel.SourcePath = tci
+	sel.SourceKind = "TCI"
+	log.Printf("source tile=%s kind=TCI file=%s", sel.TileID, tci)
+	return nil
+    }
+
+    red, err := findFileRecursive(imgPath, bandPatterns["B04"])
+    if err != nil {
+	return fmt.Errorf("tile %s: B04 not found in %s: %w", sel.TileID, imgPath, err)
+    }
+    green, err := findFileRecursive(imgPath, bandPatterns["B03"])
+    if err != nil {
+	return fmt.Errorf("tile %s: B03 not found: %w", sel.TileID, err)
+    }
+    blue, err := findFileRecursive(imgPath, bandPatterns["B02"])
+    if err != nil {
+	return fmt.Errorf("tile %s: B02 not found: %w", sel.TileID, err)
+    }
+
+    rgbVRT := filepath.Join(workDir, sel.TileID+"_rgb.vrt")
+    if err := runCmd("gdalbuildvrt", "-q", "-separate",
+	"-srcnodata", "0", "-vrtnodata", "0",
+	rgbVRT, red, green, blue); err != nil {
+	return fmt.Errorf("tile %s: build RGB VRT: %w", sel.TileID, err)
+    }
+    sel.SourcePath = rgbVRT
+    sel.SourceKind = "RGB"
+    sel.RGBVRT = rgbVRT
+    log.Printf("source tile=%s kind=RGB r=%s g=%s b=%s", sel.TileID, red, green, blue)
+    return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Файловый кэш (ускоряет работу на NFS)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var (
+    fileCacheMu sync.Mutex
+    fileCache   = map[string][]string{}
+)
+
+func listDirFiles(root string) []string {
+    fileCacheMu.Lock()
+    if files, ok := fileCache[root]; ok {
+	fileCacheMu.Unlock()
+	return files
+    }
+    fileCacheMu.Unlock()
+
+    var files []string
+    _ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	if err == nil && !d.IsDir() {
+	    files = append(files, path)
+	}
+	return nil
+    })
+
+    fileCacheMu.Lock()
+    fileCache[root] = files
+    fileCacheMu.Unlock()
+    return files
+}
+
+func findFileRecursive(root string, patterns []*regexp.Regexp) (string, error) {
+    var found []string
+    for _, path := range listDirFiles(root) {
+	name := filepath.Base(path)
+	for _, re := range patterns {
+	    if re.MatchString(name) {
+		found = append(found, path)
+		break
+	    }
+	}
+    }
+    if len(found) == 0 {
+	return "", fmt.Errorf("no matching file in %s", root)
+    }
+    sort.Strings(found)
+    return found[0], nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Статистика и нормализация
+// ─────────────────────────────────────────────────────────────────────────────
+
+func collectApproxStats(sourcePath string) ([3]bandStats, error) {
+    var out [3]bandStats
+
+    tmpStat, err := os.CreateTemp("", "mosaic-stat-*.tif")
+    if err != nil {
+	return out, err
+    }
+    tmpPath := tmpStat.Name()
+    tmpStat.Close()
+    defer os.Remove(tmpPath)
+
+    if err := runCmd("gdal_translate",
+	"-q",
+	"-outsize", "1%", "1%",
+	"-of", "GTiff",
+	"-ot", "UInt16",
+	"-b", "1", "-b", "2", "-b", "3",
+	sourcePath, tmpPath); err != nil {
+	return out, fmt.Errorf("gdal_translate for stats: %w", err)
+    }
+
+    cmd := exec.Command("gdalinfo", "-json", "-approx_stats", tmpPath)
+    raw, err := cmd.Output()
+    if err != nil {
+	if ee, ok := err.(*exec.ExitError); ok {
+	    return out, fmt.Errorf("gdalinfo: %s", strings.TrimSpace(string(ee.Stderr)))
+	}
+	return out, err
+    }
+
+    return parseStatsJSON(raw)
+}
+
+func parseStatsJSON(raw []byte) ([3]bandStats, error) {
+    var out [3]bandStats
+    dec := json.NewDecoder(bytes.NewReader(raw))
+    dec.UseNumber()
+    var payload map[string]any
+    if err := dec.Decode(&payload); err != nil {
+	return out, fmt.Errorf("decode gdalinfo json: %w", err)
+    }
+    bandsRaw, ok := payload["bands"].([]any)
+    if !ok || len(bandsRaw) < 3 {
+	return out, errors.New("gdalinfo: need 3 bands")
+    }
+    for i := 0; i < 3; i++ {
+	bm, ok := bandsRaw[i].(map[string]any)
+	if !ok {
+	    return out, fmt.Errorf("band %d: unexpected format", i)
+	}
+	minv, e1 := extractNumber(bm, "minimum", "STATISTICS_MINIMUM")
+	maxv, e2 := extractNumber(bm, "maximum", "STATISTICS_MAXIMUM")
+	meanv, e3 := extractNumber(bm, "mean", "STATISTICS_MEAN")
+	stdv, e4 := extractNumber(bm, "stdDev", "STATISTICS_STDDEV")
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil {
+	    if md, ok := bm["metadata"].(map[string]any); ok {
+		if sec, ok := md[""].(map[string]any); ok {
+		    minv, _ = extractNumber(sec, "STATISTICS_MINIMUM")
+		    maxv, _ = extractNumber(sec, "STATISTICS_MAXIMUM")
+		    meanv, _ = extractNumber(sec, "STATISTICS_MEAN")
+		    stdv, _ = extractNumber(sec, "STATISTICS_STDDEV")
+		}
+	    }
+	}
+	if maxv <= minv {
+	    maxv = minv + 1
+	}
+	out[i] = bandStats{Min: minv, Max: maxv, Mean: meanv, StdDev: stdv}
+    }
+    return out, nil
+}
+
+func extractNumber(m map[string]any, keys ...string) (float64, error) {
+    for _, k := range keys {
+	v, ok := m[k]
+	if !ok {
+	    continue
+	}
+	switch x := v.(type) {
+	case float64:
+	    return x, nil
+	case json.Number:
+	    return x.Float64()
+	case string:
+	    return strconv.ParseFloat(x, 64)
+	}
+    }
+    return 0, fmt.Errorf("not found: %v", keys)
+}
+
+// computeGlobalScale вычисляет единый диапазон нормализации по медиане всех тайлов.
+// Ключевой шаг для бесшовного стыка: все тайлы нормализуются одинаково.
+func computeGlobalScale(selections []tileSelection) [3]scaleRange {
+    var out [3]scaleRange
+    for band := 0; band < 3; band++ {
+	var lows, highs []float64
+	for _, sel := range selections {
+	    st := sel.Stats[band]
+	    std := math.Max(st.StdDev, 1.0)
+	    low := math.Max(1.0, st.Mean-2.0*std)
+	    high := math.Min(float64(65535), st.Mean+2.0*std)
+	    if high <= low {
+		low = math.Max(1.0, st.Min)
+		high = math.Max(low+1.0, st.Max)
+	    }
+	    lows = append(lows, low)
+	    highs = append(highs, high)
+	}
+	sort.Float64s(lows)
+	sort.Float64s(highs)
+	srcMin := median(lows)
+	srcMax := median(highs)
+	if srcMax <= srcMin {
+	    srcMin, srcMax = 1, 10000
+	}
+	out[band] = scaleRange{SrcMin: srcMin, SrcMax: srcMax, DstMin: 1, DstMax: 255}
+    }
+    return out
+}
+
+func median(v []float64) float64 {
+    if len(v) == 0 {
+	return 0
+    }
+    n := len(v)
+    if n%2 == 1 {
+	return v[n/2]
+    }
+    return (v[n/2-1] + v[n/2]) / 2.0
+}
+
+// normalizeTile применяет единую гамму нормализации → Byte GTiff.
+func normalizeTile(workDir string, sel *tileSelection, scale [3]scaleRange) error {
+    dst := filepath.Join(workDir, sel.TileID+"_norm.tif")
+    args := []string{
+	"-q",
+	"-of", "GTiff",
+	"-ot", "Byte",
+	"-b", "1", "-b", "2", "-b", "3",
+	"-a_nodata", "0",
+	"-co", "TILED=YES",
+	"-co", "COMPRESS=DEFLATE",
+	"-co", "PREDICTOR=2",
+	"-co", "ZLEVEL=1",
+	"-co", "BLOCKXSIZE=512",
+	"-co", "BLOCKYSIZE=512",
+    }
+    for i, r := range scale {
+	args = append(args,
+	    "-scale_"+strconv.Itoa(i+1),
+	    ff(r.SrcMin), ff(r.SrcMax),
+	    ff(r.DstMin), ff(r.DstMax),
+	)
+    }
+    args = append(args, sel.SourcePath, dst)
+    log.Printf("normalize tile=%s -> %s", sel.TileID, dst)
+    if err := runCmd("gdal_translate", args...); err != nil {
+	return fmt.Errorf("normalize tile=%s: %w", sel.TileID, err)
+    }
+    sel.NormTIF = dst
+    return nil
+}
+
+// warpTile репроецирует нормализованный тайл в целевую систему координат.
+func warpTile(workDir string, sel *tileSelection, targetSRS string, pixelSize float64, warpMemMB int) error {
+    if warpMemMB <= 0 {
+	warpMemMB = 512
+    }
+    dst := filepath.Join(workDir, sel.TileID+"_warp.tif")
+    args := []string{
+	"-q", "-overwrite",
+	"-r", "bilinear",
+	"-wm", strconv.Itoa(warpMemMB),
+	"-wo", "NUM_THREADS=ALL_CPUS",
+	"-t_srs", targetSRS,
+	"-tr", ff(pixelSize), ff(pixelSize),
+	"-tap",
+	"-srcnodata", "0 0 0",
+	"-dstnodata", "0 0 0",
+	"-dstalpha",
+	"-co", "TILED=YES",
+	"-co", "COMPRESS=DEFLATE",
+	"-co", "PREDICTOR=2",
+	"-co", "ZLEVEL=1",
+	"-co", "BLOCKXSIZE=512",
+	"-co", "BLOCKYSIZE=512",
+	sel.NormTIF, dst,
+    }
+    log.Printf("warp tile=%s -> %s", sel.TileID, dst)
+    if err := runCmd("gdalwarp", args...); err != nil {
+	return fmt.Errorf("warp tile=%s: %w", sel.TileID, err)
+    }
+    sel.WarpedTIF = dst
+    return nil
+}
+
+// buildMosaic собирает все тайлы в финальный JP2 через VRT.
+func buildMosaic(workDir string, selections []tileSelection, outPath string) error {
+    listFile := filepath.Join(workDir, "sources.txt")
+    f, err := os.Create(listFile)
+    if err != nil {
+	return fmt.Errorf("create sources list: %w", err)
+    }
+    w := bufio.NewWriter(f)
+    for _, sel := range selections {
+	if sel.WarpedTIF == "" {
+	    _ = f.Close()
+	    return fmt.Errorf("tile %s: no warped file", sel.TileID)
+	}
+	fmt.Fprintln(w, sel.WarpedTIF)
+    }
+    if err := w.Flush(); err != nil {
+	_ = f.Close()
+	return err
+    }
+    _ = f.Close()
+
+    mosaicVRT := filepath.Join(workDir, "mosaic.vrt")
+    if err := runCmd("gdalbuildvrt",
+	"-q", "-overwrite",
+	"-input_file_list", listFile,
+	mosaicVRT); err != nil {
+	return err
+    }
+
+    log.Printf("building JP2 mosaic -> %s", outPath)
+    return runCmd("gdal_translate",
+	"-q",
+	"-of", "JP2OpenJPEG",
+	"-b", "1", "-b", "2", "-b", "3",
+	"-co", "QUALITY=15",
+	"-co", "REVERSIBLE=NO",
+	"-co", "YCBCR420=YES",
+	"-co", "BLOCKXSIZE=1024",
+	"-co", "BLOCKYSIZE=1024",
+	"-co", "PROGRESSION=LRCP",
+	"-co", "RESOLUTIONS=6",
+	mosaicVRT, outPath,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Вспомогательные функции
+// ─────────────────────────────────────────────────────────────────────────────
 
 func loadConfig(path string) (*Config, error) {
     data, err := os.ReadFile(path)
@@ -264,159 +770,19 @@ func loadConfig(path string) (*Config, error) {
     if err := json.Unmarshal(data, &cfg); err != nil {
 	return nil, fmt.Errorf("parse config: %w", err)
     }
-    if strings.TrimSpace(cfg.Sentinel) == "" {
-	return nil, errors.New("config field 'sentinel' is empty")
+    for field, val := range map[string]string{
+	"results_path": cfg.ResultsPath,
+	"logs":         cfg.Logs,
+	"tmp":          cfg.Tmp,
+    } {
+	if strings.TrimSpace(val) == "" {
+	    return nil, fmt.Errorf("config field '%s' is empty", field)
+	}
     }
-    if strings.TrimSpace(cfg.ResultsPath) == "" {
-	return nil, errors.New("config field 'results_path' is empty")
-    }
-    if strings.TrimSpace(cfg.Logs) == "" {
-	return nil, errors.New("config field 'logs' is empty")
-    }
-    if strings.TrimSpace(cfg.Tmp) == "" {
-	return nil, errors.New("config field 'tmp' is empty")
+    if strings.TrimSpace(cfg.Sentinel2A) == "" && strings.TrimSpace(cfg.Sentinel) == "" {
+	return nil, fmt.Errorf("config: neither sentinel2A nor sentinel path is set")
     }
     return &cfg, nil
-}
-
-func requireExecutables(names ...string) error {
-    var missing []string
-    for _, name := range names {
-	if _, err := exec.LookPath(name); err != nil {
-	    missing = append(missing, name)
-	}
-    }
-    if len(missing) > 0 {
-	msg := fmt.Sprintf("required GDAL tools are not found in PATH: %s", strings.Join(missing, ", "))
-	log.Print(msg)
-	return errors.New(msg)
-    }
-    return nil
-}
-
-func setProcessEnvLimits(gdalCacheMB, threads int) {
-    if gdalCacheMB <= 0 {
-	gdalCacheMB = 256
-    }
-    if threads <= 0 {
-	threads = 1
-    }
-    _ = os.Setenv("GDAL_CACHEMAX", strconv.Itoa(gdalCacheMB))
-    _ = os.Setenv("VSI_CACHE", "FALSE")
-    _ = os.Setenv("GDAL_NUM_THREADS", strconv.Itoa(threads))
-    _ = os.Setenv("OMP_NUM_THREADS", strconv.Itoa(threads))
-    _ = os.Setenv("OPENBLAS_NUM_THREADS", "1")
-    _ = os.Setenv("MKL_NUM_THREADS", "1")
-}
-
-func selectBestScenesByCloud(sentinelRoot string, start, end time.Time) ([]tileSelection, error) {
-    tileSet := make(map[string]struct{}, len(tiles))
-    candidatesByTile := make(map[string][]tileCandidate, len(tiles))
-    endInclusive := end.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
-
-    for _, t := range tiles {
-	tileSet[t] = struct{}{}
-    }
-
-    for year := start.Year(); year <= end.Year(); year++ {
-	cachePath := filepath.Join(sentinelRoot, strconv.Itoa(year), "cash.json")
-	cache, err := readCache(cachePath)
-	if err != nil {
-	    return nil, err
-	}
-	log.Printf("read cache=%s entries=%d", cachePath, len(cache.Tiles))
-
-	for _, entry := range cache.Tiles {
-	    tileID := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(entry.TileID)), "T")
-	    if _, ok := tileSet[tileID]; !ok {
-		continue
-	    }
-	    capturedAt, ok := parseCapturedAt(entry)
-	    if !ok {
-		log.Printf("skip invalid date tile=%s safe=%s date=%s captured_at=%s",
-		    tileID, entry.SafeName, entry.Date, entry.CapturedAt)
-		continue
-	    }
-	    if capturedAt.Before(start) || capturedAt.After(endInclusive) {
-		continue
-	    }
-	    candidatesByTile[tileID] = append(candidatesByTile[tileID], tileCandidate{
-		TileID:     tileID,
-		Entry:      entry,
-		CapturedAt: capturedAt,
-	    })
-	}
-    }
-
-    var out []tileSelection
-    var missing []string
-    for _, tileID := range tiles {
-	candidates := candidatesByTile[tileID]
-	if len(candidates) == 0 {
-	    missing = append(missing, tileID)
-	    continue
-	}
-
-	selected, threshold, ok := pickCandidateByThreshold(candidates)
-	if !ok {
-	    missing = append(missing, tileID)
-	    continue
-	}
-
-	log.Printf("selected tile=%s threshold<=%d cloud=%.6f captured_at=%s safe=%s img_data=%s",
-	    tileID, threshold, selected.Entry.Cloud, selected.CapturedAt.Format(time.RFC3339),
-	    selected.Entry.SafeName, selected.Entry.ImgDataPath)
-
-	out = append(out, tileSelection{
-	    TileID:     tileID,
-	    Entry:      selected.Entry,
-	    CapturedAt: selected.CapturedAt,
-	    Threshold:  threshold,
-	    Cloud:      selected.Entry.Cloud,
-	})
-    }
-
-    if len(missing) > 0 {
-	return nil, fmt.Errorf("no scenes found in period %s..%s for tiles: %s",
-	    start.Format("2006-01-02"), end.Format("2006-01-02"), strings.Join(missing, ", "))
-    }
-
-    return out, nil
-}
-
-func pickCandidateByThreshold(candidates []tileCandidate) (tileCandidate, int, bool) {
-    if len(candidates) == 0 {
-	return tileCandidate{}, 0, false
-    }
-
-    maxCloud := 1
-    for _, c := range candidates {
-	v := int(math.Ceil(c.Entry.Cloud))
-	if v > maxCloud {
-	    maxCloud = v
-	}
-    }
-
-    for threshold := 1; threshold <= maxCloud; threshold++ {
-	var best tileCandidate
-	found := false
-
-	for _, c := range candidates {
-	    if c.Entry.Cloud > float64(threshold) {
-		continue
-	    }
-	    if !found || c.CapturedAt.After(best.CapturedAt) {
-		best = c
-		found = true
-	    }
-	}
-
-	if found {
-	    return best, threshold, true
-	}
-    }
-
-    return tileCandidate{}, 0, false
 }
 
 func readCache(path string) (*TileCache, error) {
@@ -432,434 +798,65 @@ func readCache(path string) (*TileCache, error) {
 }
 
 func parseCapturedAt(entry SafeTileEntry) (time.Time, bool) {
-    if s := strings.TrimSpace(entry.CapturedAt); s != "" {
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-	    return t, true
+    for _, s := range []string{entry.CapturedAt, entry.Date} {
+	s = strings.TrimSpace(s)
+	if s == "" {
+	    continue
 	}
-	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
-	    return t, true
-	}
-    }
-    if s := strings.TrimSpace(entry.Date); s != "" {
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-	    return t, true
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+	    if t, err := time.Parse(layout, s); err == nil {
+		return t, true
+	    }
 	}
     }
     return time.Time{}, false
 }
 
-func prepareTileInputs(workDir string, sel *tileSelection) error {
-    tci, err := findTCIFile(sel.Entry.ImgDataPath)
-    if err == nil && strings.TrimSpace(tci) != "" {
-	sel.SourcePath = tci
-	sel.SourceKind = "TCI"
-	stats, err := collectStats(tci)
-	if err != nil {
-	    return fmt.Errorf("tile %s: collect TCI stats: %w", sel.TileID, err)
+func normalizeTileID(raw string) string {
+    return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(raw)), "T")
+}
+
+func requireExecutables(names ...string) error {
+    var missing []string
+    for _, n := range names {
+	if _, err := exec.LookPath(n); err != nil {
+	    missing = append(missing, n)
 	}
-	sel.Stats = stats
-	sel.SourceReady = true
-	log.Printf("source tile=%s kind=TCI file=%s cloud=%.6f thr<=%d",
-	    sel.TileID, tci, sel.Cloud, sel.Threshold)
-	return nil
     }
-
-    red, err := findBandFile(sel.Entry.ImgDataPath, "B04")
-    if err != nil {
-	return fmt.Errorf("tile %s: neither TCI nor B04 found: %w", sel.TileID, err)
+    if len(missing) > 0 {
+	return fmt.Errorf("GDAL tools not found: %s", strings.Join(missing, ", "))
     }
-    green, err := findBandFile(sel.Entry.ImgDataPath, "B03")
-    if err != nil {
-	return fmt.Errorf("tile %s: fallback B03 not found: %w", sel.TileID, err)
-    }
-    blue, err := findBandFile(sel.Entry.ImgDataPath, "B02")
-    if err != nil {
-	return fmt.Errorf("tile %s: fallback B02 not found: %w", sel.TileID, err)
-    }
-
-    rgbVRT := filepath.Join(workDir, fmt.Sprintf("%s_rgb.vrt", sel.TileID))
-    if err := buildRGBVRT(rgbVRT, red, green, blue); err != nil {
-	return fmt.Errorf("tile %s: build RGB VRT: %w", sel.TileID, err)
-    }
-
-    sel.SourcePath = rgbVRT
-    sel.SourceKind = "RGB"
-    sel.RGBVRT = rgbVRT
-
-    stats, err := collectStats(rgbVRT)
-    if err != nil {
-	return fmt.Errorf("tile %s: collect RGB stats: %w", sel.TileID, err)
-    }
-    sel.Stats = stats
-    sel.SourceReady = true
-
-    log.Printf("source tile=%s kind=RGB file=%s cloud=%.6f thr<=%d",
-	sel.TileID, rgbVRT, sel.Cloud, sel.Threshold)
-
     return nil
 }
 
-func findTCIFile(imgDataPath string) (string, error) {
-    entries, err := os.ReadDir(imgDataPath)
-    if err != nil {
-	return "", fmt.Errorf("read IMG_DATA %s: %w", imgDataPath, err)
+func setGDALEnv(cacheMB, threads int) {
+    if cacheMB <= 0 {
+	cacheMB = 512
     }
-
-    var regexps []*regexp.Regexp
-    for _, p := range tciPatterns {
-	regexps = append(regexps, regexp.MustCompile(p))
+    if threads <= 0 {
+	threads = 4
     }
-
-    var candidates []string
-    for _, entry := range entries {
-	if entry.IsDir() {
-	    continue
-	}
-	name := entry.Name()
-	for _, re := range regexps {
-	    if re.MatchString(name) {
-		candidates = append(candidates, filepath.Join(imgDataPath, name))
-		break
-	    }
-	}
-    }
-
-    sort.Strings(candidates)
-    if len(candidates) == 0 {
-	return "", errors.New("TCI not found")
-    }
-    return candidates[0], nil
-}
-
-func findBandFile(imgDataPath, band string) (string, error) {
-    entries, err := os.ReadDir(imgDataPath)
-    if err != nil {
-	return "", fmt.Errorf("read IMG_DATA %s: %w", imgDataPath, err)
-    }
-
-    patterns := bandPatterns[band]
-    var regexps []*regexp.Regexp
-    for _, p := range patterns {
-	regexps = append(regexps, regexp.MustCompile(p))
-    }
-
-    var candidates []string
-    for _, entry := range entries {
-	if entry.IsDir() {
-	    continue
-	}
-	name := entry.Name()
-	for _, re := range regexps {
-	    if re.MatchString(name) {
-		candidates = append(candidates, filepath.Join(imgDataPath, name))
-		break
-	    }
-	}
-    }
-
-    sort.Strings(candidates)
-    if len(candidates) == 0 {
-	return "", fmt.Errorf("band %s not found in %s", band, imgDataPath)
-    }
-    return candidates[0], nil
-}
-
-func buildRGBVRT(path, red, green, blue string) error {
-    return runCmd("gdalbuildvrt", "-q", "-separate", "-srcnodata", "0", "-vrtnodata", "0", path, red, green, blue)
-}
-
-func collectStats(path string) ([3]bandStats, error) {
-    var out [3]bandStats
-
-    cmd := exec.Command("gdalinfo", "-json", "-stats", path)
-    raw, err := cmd.Output()
-    if err != nil {
-	if ee, ok := err.(*exec.ExitError); ok {
-	    return out, fmt.Errorf("gdalinfo failed: %s", strings.TrimSpace(string(ee.Stderr)))
-	}
-	return out, err
-    }
-
-    decoder := json.NewDecoder(bytes.NewReader(raw))
-    decoder.UseNumber()
-
-    var payload map[string]any
-    if err := decoder.Decode(&payload); err != nil {
-	return out, fmt.Errorf("decode gdalinfo json: %w", err)
-    }
-
-    bandsRaw, ok := payload["bands"].([]any)
-    if !ok || len(bandsRaw) < 3 {
-	return out, errors.New("gdalinfo json does not contain 3 bands")
-    }
-
-    for i := 0; i < 3; i++ {
-	bandMap, ok := bandsRaw[i].(map[string]any)
-	if !ok {
-	    return out, errors.New("unexpected band format in gdalinfo json")
-	}
-
-	statsMap, ok := bandMap["metadata"].(map[string]any)
-	if !ok {
-	    return out, errors.New("missing metadata in gdalinfo json")
-	}
-
-	statSection, ok := statsMap[""].(map[string]any)
-	if !ok {
-	    statSection = statsMap
-	}
-
-	minv, err := findFloat(statSection, "STATISTICS_MINIMUM", "minimum")
-	if err != nil {
-	    return out, err
-	}
-	maxv, err := findFloat(statSection, "STATISTICS_MAXIMUM", "maximum")
-	if err != nil {
-	    return out, err
-	}
-	meanv, err := findFloat(statSection, "STATISTICS_MEAN", "mean")
-	if err != nil {
-	    return out, err
-	}
-	stdv, err := findFloat(statSection, "STATISTICS_STDDEV", "stdDev")
-	if err != nil {
-	    return out, err
-	}
-
-	out[i] = bandStats{
-	    Min:    minv,
-	    Max:    maxv,
-	    Mean:   meanv,
-	    StdDev: stdv,
-	}
-    }
-
-    return out, nil
-}
-
-func findFloat(m map[string]any, keys ...string) (float64, error) {
-    for _, key := range keys {
-	v, ok := m[key]
-	if !ok {
-	    continue
-	}
-	switch x := v.(type) {
-	case float64:
-	    return x, nil
-	case json.Number:
-	    return x.Float64()
-	case string:
-	    return strconv.ParseFloat(x, 64)
-	}
-    }
-    return 0, fmt.Errorf("no numeric field found among keys %v", keys)
-}
-
-func computeGlobalScale(selections []tileSelection) [3]scaleRange {
-    var out [3]scaleRange
-
-    for band := 0; band < 3; band++ {
-	var lows []float64
-	var highs []float64
-
-	for _, sel := range selections {
-	    st := sel.Stats[band]
-	    std := math.Max(st.StdDev, 1.0)
-
-	    low := math.Max(1.0, st.Mean-2.0*std)
-	    high := math.Min(st.Max, st.Mean+2.0*std)
-
-	    if high <= low {
-		low = math.Max(1.0, st.Min)
-		high = math.Max(low+1.0, st.Max)
-	    }
-
-	    lows = append(lows, low)
-	    highs = append(highs, high)
-	}
-
-	sort.Float64s(lows)
-	sort.Float64s(highs)
-
-	srcMin := median(lows)
-	srcMax := median(highs)
-
-	if srcMax <= srcMin {
-	    srcMin = 1
-	    srcMax = 255
-	}
-
-	out[band] = scaleRange{
-	    SrcMin: srcMin,
-	    SrcMax: srcMax,
-	    DstMin: 1,
-	    DstMax: 255,
-	}
-    }
-
-    return out
-}
-
-func median(values []float64) float64 {
-    if len(values) == 0 {
-	return 0
-    }
-    n := len(values)
-    if n%2 == 1 {
-	return values[n/2]
-    }
-    return (values[n/2-1] + values[n/2]) / 2.0
-}
-
-func normalizeTileWithGlobalScale(workDir string, sel *tileSelection, scale [3]scaleRange) error {
-    dst := filepath.Join(workDir, fmt.Sprintf("%s_norm.tif", sel.TileID))
-
-    args := []string{
-	"-q",
-	"-of", "GTiff",
-	"-ot", "Byte",
-	"-b", "1",
-	"-b", "2",
-	"-b", "3",
-	"-a_nodata", "0",
-	"-co", "TILED=YES",
-	"-co", "COMPRESS=DEFLATE",
-	"-co", "PREDICTOR=2",
-	"-co", "ZLEVEL=4",
-	"-co", "BLOCKXSIZE=512",
-	"-co", "BLOCKYSIZE=512",
-    }
-
-    for band := 0; band < 3; band++ {
-	r := scale[band]
-	args = append(args,
-	    "-scale_"+strconv.Itoa(band+1),
-	    formatFloat(r.SrcMin),
-	    formatFloat(r.SrcMax),
-	    formatFloat(r.DstMin),
-	    formatFloat(r.DstMax),
-	)
-    }
-
-    args = append(args, sel.SourcePath, dst)
-
-    log.Printf("normalize tile=%s kind=%s src=%s dst=%s cloud=%.6f",
-	sel.TileID, sel.SourceKind, sel.SourcePath, dst, sel.Cloud)
-
-    if err := runCmd("gdal_translate", args...); err != nil {
-	return err
-    }
-
-    sel.NormTIF = dst
-    return nil
-}
-
-func warpTileToCommonGrid(workDir string, sel *tileSelection, targetSRS string, pixelSize float64, warpMemMB int) error {
-    if warpMemMB <= 0 {
-	warpMemMB = 256
-    }
-
-    dst := filepath.Join(workDir, fmt.Sprintf("%s_warp.tif", sel.TileID))
-    args := []string{
-	"-q",
-	"-overwrite",
-	"-r", "bilinear",
-	"-wm", strconv.Itoa(warpMemMB),
-	"-wo", "NUM_THREADS=1",
-	"-wo", "OPTIMIZE_SIZE=YES",
-	"-t_srs", targetSRS,
-	"-tr", formatFloat(pixelSize), formatFloat(pixelSize),
-	"-tap",
-	"-srcnodata", "0 0 0",
-	"-dstnodata", "0 0 0",
-	"-dstalpha",
-	"-co", "TILED=YES",
-	"-co", "COMPRESS=DEFLATE",
-	"-co", "PREDICTOR=2",
-	"-co", "ZLEVEL=4",
-	"-co", "BLOCKXSIZE=512",
-	"-co", "BLOCKYSIZE=512",
-	sel.NormTIF,
-	dst,
-    }
-
-    log.Printf("warp tile=%s dst=%s warpMemMB=%d", sel.TileID, dst, warpMemMB)
-    if err := runCmd("gdalwarp", args...); err != nil {
-	return err
-    }
-
-    sel.WarpedTIF = dst
-    return nil
-}
-
-func buildMosaic(workDir string, selections []tileSelection, outPath string) error {
-    vrtList := filepath.Join(workDir, "mosaic_sources.txt")
-    f, err := os.Create(vrtList)
-    if err != nil {
-	return fmt.Errorf("create source list: %w", err)
-    }
-
-    w := bufio.NewWriter(f)
-    for _, sel := range selections {
-	if strings.TrimSpace(sel.WarpedTIF) == "" {
-	    _ = f.Close()
-	    return fmt.Errorf("tile %s: warped file is empty", sel.TileID)
-	}
-	if _, err := fmt.Fprintln(w, sel.WarpedTIF); err != nil {
-	    _ = f.Close()
-	    return fmt.Errorf("write source list: %w", err)
-	}
-    }
-    if err := w.Flush(); err != nil {
-	_ = f.Close()
-	return fmt.Errorf("flush source list: %w", err)
-    }
-    if err := f.Close(); err != nil {
-	return fmt.Errorf("close source list: %w", err)
-    }
-
-    mosaicVRT := filepath.Join(workDir, "mosaic.vrt")
-    if err := runCmd(
-	"gdalbuildvrt",
-	"-q",
-	"-overwrite",
-	"-input_file_list", vrtList,
-	mosaicVRT,
-    ); err != nil {
-	return err
-    }
-
-    return runCmd(
-	"gdal_translate",
-	"-q",
-	"-of", "JP2OpenJPEG",
-	"-b", "1",
-	"-b", "2",
-	"-b", "3",
-	"-co", "QUALITY=25",
-	"-co", "REVERSIBLE=NO",
-	"-co", "YCBCR420=NO",
-	"-co", "BLOCKXSIZE=1024",
-	"-co", "BLOCKYSIZE=1024",
-	mosaicVRT,
-	outPath,
-    )
+    _ = os.Setenv("GDAL_CACHEMAX", strconv.Itoa(cacheMB))
+    _ = os.Setenv("GDAL_NUM_THREADS", strconv.Itoa(threads))
+    _ = os.Setenv("VSI_CACHE", "FALSE")
+    _ = os.Setenv("OMP_NUM_THREADS", strconv.Itoa(threads))
+    _ = os.Setenv("OPENBLAS_NUM_THREADS", "1")
+    _ = os.Setenv("MKL_NUM_THREADS", "1")
 }
 
 func runCmd(name string, args ...string) error {
     log.Printf("exec: %s %s", name, strings.Join(args, " "))
-
     cmd := exec.Command(name, args...)
     out, err := cmd.CombinedOutput()
     if len(out) > 0 {
-	log.Printf("%s output:\n%s", name, string(out))
+	log.Printf("  output: %s", strings.TrimSpace(string(out)))
     }
     if err != nil {
-	return fmt.Errorf("%s failed: %w", name, err)
+	return fmt.Errorf("%s: %w", name, err)
     }
     return nil
 }
 
-func formatFloat(v float64) string {
-    return strconv.FormatFloat(v, 'f', 6, 64)
+func ff(v float64) string {
+    return strconv.FormatFloat(v, 'f', 4, 64)
 }

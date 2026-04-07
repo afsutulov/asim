@@ -38,13 +38,15 @@ function renderTableRows(targetId, rows, includeDownload = false, includeDelete 
     return;
   }
   rows.forEach((row) => {
+    const period1 = `<span class="date-line">${row.start}</span><span class="date-line">${row.end}</span>`;
+    const period2 = (row.start2 && row.start2 !== '—') ? `<span class="date-line">${row.start2}</span><span class="date-line">${row.end2}</span>` : '—';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="table-left">${row.model}</td>
       <td class="table-left">${row.poligon}</td>
       <td class="table-center">${row.cloud}</td>
-      <td class="table-center">${row.start}</td>
-      <td class="table-center">${row.end}</td>
+      <td class="table-center">${period1}</td>
+      <td class="table-center">${period2}</td>
       <td class="table-center">${row.time}</td>
       ${includeResultActions ? `<td class="table-center"><div class="inline-actions"><a class="soft-btn link-btn" href="${row.download_url}">Скачать</a><button class="soft-btn" data-result-delete="${row.uuid}">Удалить</button></div></td>` : ''}
       ${includeDownload && !includeResultActions ? `<td class="table-center"><a class="soft-btn link-btn" href="${row.download_url}">Скачать</a></td>` : ''}
@@ -140,18 +142,23 @@ function openModal(content, large = false) {
 function closeModal() { const backdrop = document.getElementById('modal-backdrop'); backdrop.classList.add('hidden'); backdrop.innerHTML = ''; }
 
 function processingModalTemplate() {
-  const modelOptions = boot.modelOptions.map((item) => `<option value="${item.key}" data-inputs="${item.inputs}">${item.description}</option>`).join('');
+  const modelOptions = boot.modelOptions.map((item) => `<option value="${item.key}" data-inputs="${item.inputs}" data-season="${item.season || ''}">${item.description}</option>`).join('');
   const poligonOptions = boot.poligonOptions.map((item) => `<option value="${item.key}">${item.name}</option>`).join('');
   return `
     <div class="section-header"><h3>Создать обработку</h3><button class="ghost-btn" data-close-modal>✕</button></div>
     <form id="create-processing-form" class="form-grid">
       <label>Модель<select id="model" name="model" required><option value="">Выберите модель</option>${modelOptions}</select></label>
       <label>Локация<select id="poligon" name="poligon" required><option value="">Выберите локацию</option>${poligonOptions}</select></label>
-      <label>Дата начала<input type="date" id="start" name="start" required></label>
-      <label>Дата завершения<input type="date" id="end" name="end" required></label>
+      <label id="start-label">Дата начала<input type="date" id="start" name="start" required></label>
+      <label id="end-label">Дата завершения<input type="date" id="end" name="end" required></label>
       <div id="second-inputs" class="hidden full form-grid">
         <label>Дата начала (start2)<input type="date" id="start2" name="start2"></label>
         <label>Дата завершения (end2)<input type="date" id="end2" name="end2"></label>
+      </div>
+      <div id="season-year-inputs" class="hidden full form-grid">
+        <label>Год нового снимка<select id="year" name="year"><option value="">Выберите год</option></select></label>
+        <label>Год базового снимка<select id="year2" name="year2"><option value="">Выберите год</option></select></label>
+        <div id="season-hint" class="muted full"></div>
       </div>
       <label class="full">Облачность: <span id="cloud-value">50</span>%<input type="range" id="cloud" name="cloud" min="0" max="100" value="50"></label>
       <div class="full"><button class="primary-btn" type="submit">Создать</button></div>
@@ -162,28 +169,130 @@ function processingModalTemplate() {
 function bindProcessingModal() {
   const modelSelect = document.getElementById('model');
   const secondInputs = document.getElementById('second-inputs');
-  modelSelect.addEventListener('change', () => {
-    const selected = modelSelect.options[modelSelect.selectedIndex];
-    const inputs = Number(selected.dataset.inputs || '1');
-    secondInputs.classList.toggle('hidden', inputs !== 2);
-    document.getElementById('start2').required = inputs === 2;
-    document.getElementById('end2').required = inputs === 2;
+  const seasonYearInputs = document.getElementById('season-year-inputs');
+  const startLabel = document.getElementById('start-label');
+  const endLabel = document.getElementById('end-label');
+  const startEl = document.getElementById('start');
+  const endEl = document.getElementById('end');
+
+  const SEASON_RANGES = {
+    spring: (y) => [`${y}-03-01`, `${y}-05-31`],
+    summer: (y) => [`${y}-06-01`, `${y}-08-31`],
+    autumn: (y) => [`${y}-09-01`, `${y}-11-30`],
+    winter: (y) => [`${y}-12-01`, `${y + 1}-02-28`],
+  };
+  const SEASON_LABELS = { spring: 'весна', summer: 'лето', autumn: 'осень', winter: 'зима' };
+
+  let cachedYears = [];
+
+  async function loadYears() {
+    if (cachedYears.length) return;
+    try { cachedYears = await fetchJson('/api/available-years'); } catch (_) { cachedYears = []; }
+  }
+
+  function fillYearSelects() {
+    ['year', 'year2'].forEach((id) => {
+      const sel = document.getElementById(id);
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">Выберите год</option>' +
+        cachedYears.map((y) => `<option value="${y}"${String(y) === prev ? ' selected' : ''}>${y}</option>`).join('');
+    });
+  }
+
+  function updateSeasonHint(season) {
+    const hint = document.getElementById('season-hint');
+    const y = Number(document.getElementById('year').value);
+    const y2 = Number(document.getElementById('year2').value);
+    const label = SEASON_LABELS[season] || season;
+    if (y && y2 && SEASON_RANGES[season]) {
+      const [s1, e1] = SEASON_RANGES[season](y);
+      const [s2, e2] = SEASON_RANGES[season](y2);
+      hint.textContent = `${label}: ${s1}–${e1}  |  базовый: ${s2}–${e2}`;
+    } else {
+      hint.textContent = label ? `Сезон: ${label}` : '';
+    }
+  }
+
+  modelSelect.addEventListener('change', async () => {
+    const sel = modelSelect.options[modelSelect.selectedIndex];
+    const inputs = Number(sel.dataset.inputs || '1');
+    const season = sel.dataset.season || '';
+
+    // Сбросить всё в исходное состояние
+    secondInputs.classList.add('hidden');
+    seasonYearInputs.classList.add('hidden');
+    startLabel.classList.remove('hidden');
+    endLabel.classList.remove('hidden');
+    startEl.required = true;
+    endEl.required = true;
+    document.getElementById('start2').required = false;
+    document.getElementById('end2').required = false;
+    document.getElementById('year').required = false;
+    document.getElementById('year2').required = false;
+
+    if (season) {
+      // Сезонная модель: скрываем ввод дат, показываем выбор года.
+      // Работает независимо от inputs — год выбирается всегда когда задан season.
+      startLabel.classList.add('hidden');
+      endLabel.classList.add('hidden');
+      startEl.required = false;
+      endEl.required = false;
+      await loadYears();
+      fillYearSelects();
+      seasonYearInputs.classList.remove('hidden');
+      document.getElementById('year').required = true;
+      // year2 нужен только при inputs=2 (базовый период)
+      const year2Label = document.querySelector('label[for="year2"], #season-year-inputs label:nth-child(2)');
+      if (inputs === 2) {
+        document.getElementById('year2').required = true;
+        if (year2Label) year2Label.classList.remove('hidden');
+        updateSeasonHint(season);
+        ['year', 'year2'].forEach((id) =>
+          document.getElementById(id).addEventListener('change', () => updateSeasonHint(season)));
+      } else {
+        document.getElementById('year2').required = false;
+        if (year2Label) year2Label.classList.add('hidden');
+        const hint = document.getElementById('season-hint');
+        if (hint) hint.classList.add('hidden');
+        document.getElementById('year').addEventListener('change', () => updateSeasonHint(season));
+      }
+    } else if (inputs === 2) {
+      // Не сезонная, но двухпериодная: ручной ввод второго диапазона дат
+      secondInputs.classList.remove('hidden');
+      document.getElementById('start2').required = true;
+      document.getElementById('end2').required = true;
+    }
   });
+
   const cloud = document.getElementById('cloud');
   cloud.addEventListener('input', () => document.getElementById('cloud-value').textContent = cloud.value);
+
   document.getElementById('create-processing-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const errorBox = document.getElementById('create-error');
     errorBox.classList.add('hidden');
+    const sel = modelSelect.options[modelSelect.selectedIndex];
+    const season = sel.dataset.season || '';
+    const inputs = Number(sel.dataset.inputs || '1');
     const payload = {
       model: document.getElementById('model').value,
       poligon: document.getElementById('poligon').value,
-      start: document.getElementById('start').value,
-      end: document.getElementById('end').value,
-      start2: document.getElementById('start2').value,
-      end2: document.getElementById('end2').value,
       cloud: Number(document.getElementById('cloud').value),
     };
+    if (season) {
+      // Сезонная модель: передаём год(ы), бэкенд сам вычислит даты
+      payload.year = Number(document.getElementById('year').value);
+      if (inputs === 2) {
+        payload.year2 = Number(document.getElementById('year2').value);
+      }
+    } else {
+      payload.start = document.getElementById('start').value;
+      payload.end = document.getElementById('end').value;
+      if (inputs === 2) {
+        payload.start2 = document.getElementById('start2').value;
+        payload.end2 = document.getElementById('end2').value;
+      }
+    }
     try {
       await fetchJson('/api/processing/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       closeModal();

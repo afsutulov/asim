@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func LoadTileCache(path string) (*TileCache, error) {
 	if cache.Version < 7 {
 		return nil, fmt.Errorf("outdated cash.json version %d: regenerate cache with current cron", cache.Version)
 	}
-	if cache.Preprocess != "sentinel" {
+	if cache.Preprocess != "sentinel" && cache.Preprocess != "sentinel2a" {
 		return nil, fmt.Errorf("unsupported cash.json preprocess: %s", cache.Preprocess)
 	}
 	if len(cache.Tiles) == 0 {
@@ -163,12 +164,20 @@ func LoadTilesForPeriod(root, start, end string, cloudLimit float64) ([]SafeTile
 	startDate, _ := parseDateOnly(start)
 	endDate, _ := parseDateOnly(end)
 	out := make([]SafeTile, 0)
+	foundAnyCache := false
 	for _, year := range years {
 		cachePath := DefaultCashPathForYear(root, year)
 		cache, err := LoadTileCache(cachePath)
 		if err != nil {
+			// Если файл кэша для года отсутствует — пропускаем этот год.
+			// Это нормальная ситуация когда период пересекает несколько лет,
+			// но снимки есть не за каждый из них.
+			if os.IsNotExist(err) || isNotExistError(err) {
+				continue
+			}
 			return nil, fmt.Errorf("load %s: %w", cachePath, err)
 		}
+		foundAnyCache = true
 		for _, item := range cache.Tiles {
 			ts, err := parseDateOnly(item.Date)
 			if err != nil {
@@ -183,8 +192,25 @@ func LoadTilesForPeriod(root, start, end string, cloudLimit float64) ([]SafeTile
 			out = append(out, entryToTile(item))
 		}
 	}
+	// Если ни один файл кэша не найден — сообщаем явно.
+	if !foundAnyCache {
+		return nil, fmt.Errorf("no cash.json found for period %s..%s in %s", start, end, root)
+	}
 	out, _ = dedupeTiles(out)
 	return out, nil
+}
+
+// isNotExistError проверяет что ошибка обёрнута вокруг «файл не найден»,
+// в том числе через fmt.Errorf("load ...: %w", err).
+func isNotExistError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return os.IsNotExist(pathErr)
+	}
+	return os.IsNotExist(err)
 }
 
 func inferYearFromCashPath(path string) int {

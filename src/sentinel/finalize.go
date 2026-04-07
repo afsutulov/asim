@@ -1,17 +1,16 @@
 package main
 
 // FinalizeSpec заполняет значения по умолчанию в спецификации модели.
-// Нужен, чтобы модельные спецификации могли быть лаконичными, а пайплайн
-// всегда получал валидные параметры.
 //
 // Логика:
-//   - если ONNXFile не задан, берём <Name>.onnx
+//   - если ONNXFile не задан, берём <n>.onnx
 //   - если Tile не задан, ставим 256
 //   - Bound приводим к неотрицательному значению
 //   - если Preprocess пустой, ставим "sentinel"
 //   - Inputs по умолчанию 1
-//   - Simplify по умолчанию 0 (без упрощения)
-//   - Divisor НЕ берётся из JSON. Для проекта sentinel он всегда 10000
+//   - NumClasses по умолчанию 1 (бинарная модель)
+//   - Divisor по умолчанию 10000, но может быть переопределён ранее
+//   - Merge по умолчанию true для обратной совместимости
 func FinalizeSpec(m ModelSpec) ModelSpec {
 	if m.ONNXFile == "" && m.Name != "" {
 		m.ONNXFile = m.Name + ".onnx"
@@ -28,8 +27,28 @@ func FinalizeSpec(m ModelSpec) ModelSpec {
 	if m.Preprocess == "" {
 		m.Preprocess = "sentinel"
 	}
+	if m.Resolution == "" {
+		m.Resolution = "R10m"
+	}
 	if m.Inputs <= 0 {
 		m.Inputs = 1
+	}
+	if m.NumClasses <= 0 {
+		m.NumClasses = 1
+	}
+	if m.MaskFilter.Connectivity != 8 {
+		m.MaskFilter.Connectivity = 4
+	}
+	// По умолчанию оставляем историческое поведение: dissolve включён.
+	// Так как bool в JSON не позволяет отличить "не задано" от false,
+	// используем безопасное правило: для reforestation/croptypes merge по умолчанию false,
+	// для остальных моделей — true.
+	if !m.Merge {
+		if m.Name != "reforestation" && m.Name != "croptypes" {
+			m.Merge = true
+		}
+	} else {
+		m.Merge = true
 	}
 	m.Divisor = 10000
 	return m

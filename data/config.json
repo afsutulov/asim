@@ -2,7 +2,8 @@
   "logs": "/var/log/asim",
   "path": "/opt/asim",
   "satellite": "/mnt/nfs-share/newest",
-  "sentinel": "/mnt/nfs-share/newest/sentinel",
+  "sentinel": "/mnt/nfs-share/newest/Sentinel2_L1C",
+  "sentinel2A": "/mnt/nfs-share/newest/Sentinel2_L2A",
   "tmp": "/mnt/data",
   "users": "/opt/asim/data/users.json",
   "poli_path": "/opt/asim/poligons",
@@ -20,8 +21,10 @@
       "bound": 32,
       "threshold": 0.6,
       "preprocess": "sentinel",
-      "min_area": 1000,
-      "inputs": 1
+      "min_area": 100,
+      "inputs": 1,
+      "preserve_native_resolution": true,
+      "merge": false
     },
     "fire": {
       "description": "Гари",
@@ -31,8 +34,10 @@
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
+      "poligons-off": ["naspunkti"],
       "min_area": 1000,
-      "inputs": 1
+      "inputs": 1,
+      "preserve_native_resolution": true
     },
     "quarry": {
       "description": "Карьеры",
@@ -43,7 +48,8 @@
       "threshold": 0.5,
       "preprocess": "sentinel",
       "min_area": 1000,
-      "inputs": 1
+      "inputs": 1,
+      "preserve_native_resolution": true
     },
     "landfill": {
       "description": "ТКО (свалки)",
@@ -54,7 +60,8 @@
       "threshold": 0.1,
       "preprocess": "sentinel",
       "min_area": 1000,
-      "inputs": 1
+      "inputs": 1,
+      "preserve_native_resolution": true
     },
     "arable": {
       "description": "Границы пашни",
@@ -65,104 +72,213 @@
       "threshold": 0.5,
       "preprocess": "sentinel",
       "min_area": 1000,
-      "inputs": 1
+      "inputs": 1,
+      "preserve_native_resolution": true
     },
     "windfall": {
       "description": "Ветровалы",
       "onnx_file": "windfall.onnx",
-      "channels": ["B04", "B03", "B02", "B08"],
+      "season": "summer",
+      "channels": ["B04", "B03", "B02", "B11"],
       "tile": 448,
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
-      "min_area": 10000,
-      "inputs": 2
+      "detection_classes": [1, 2],
+      "min_area": 1000,
+      "inputs": 2,
+      "best_scene_per_tile": true,
+      "preserve_native_resolution": true,
+      "merge": false,
+      "mask_filter": {
+        "enabled": true,
+        "min_area": 300,
+        "connectivity": 4
+      }
     },
     "def_sum": {
       "description": "Вырубки (лето)",
       "onnx_file": "def_sum.onnx",
+      "season": "summer",
       "channels": ["B04", "B03", "B02", "B11"],
       "tile": 448,
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
-      "inputs": 2
+      "min_area": 100,
+      "inputs": 2,
+      "preserve_native_resolution": true
     },
     "def_win": {
       "description": "Вырубки (зима)",
       "onnx_file": "def_win.onnx",
+      "season": "winter",
       "channels": ["B04", "B03", "B02", "B11"],
       "tile": 448,
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
-      "inputs": 2
+      "min_area": 100,
+      "inputs": 2,
+      "preserve_native_resolution": true
     },
     "def_spr": {
       "description": "Вырубки (весна)",
       "onnx_file": "def_spr.onnx",
+      "season": "spring",
       "channels": ["B04", "B03", "B02", "B11"],
       "tile": 448,
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
-      "inputs": 2
+      "min_area": 100,
+      "inputs": 2,
+      "preserve_native_resolution": true
     },
     "def_aut": {
       "description": "Вырубки (осень)",
       "onnx_file": "def_aut.onnx",
+      "season": "autumn",
       "channels": ["B04", "B03", "B02", "B11"],
       "tile": 448,
       "bound": 32,
       "threshold": 0.5,
       "preprocess": "sentinel",
-      "inputs": 2
+      "min_area": 100,
+      "inputs": 2,
+      "preserve_native_resolution": true
     },
-    "forest": {
-      "description": "Лесопатологии",
-      "onnx_file": "forest.onnx",
-      "channels": ["B04", "B03", "B02", "B08"],
-      "tile": 512,
-      "bound": 32,
-      "threshold": 0.9,
-      "preprocess": "sentinel",
+    "forest_disease": {
+      "description": "Границы усыхания лесной растительности",
+      "season": "summer",
+      "channels": ["B05", "B06"],
+      "preprocess": "pathology",
       "inputs": 1,
-      "min_area": 10000.0
+      "min_area": 10000,
+      "cloud_mask_mode": "simple"
     },
-    "forest_insects": {
-      "description": "Усыхание леса: насекомые-вредители",
-      "onnx_file": "forest_insects.onnx",
-      "channels": ["B01", "B03", "B05", "B06", "B11"],
-      "tile": 256,
-      "bound": 32,
-      "threshold": 0.9,
-      "preprocess": "sentinel",
-      "inputs": 1,
-      "min_area": 10000.0
-    },
-    "forest_fungi": {
-      "description": "Усыхание леса: грибные заболевания",
-      "onnx_file": "forest_fungi.onnx",
-      "channels": [ "B01", "B03", "B05", "B06", "B11"],
-      "tile": 256,
-      "bound": 32,
-      "threshold": 0.9,
-      "preprocess": "sentinel",
-      "inputs": 1,
-      "min_area": 10000.0
+    "forest_disease_diff": {
+      "description": "Границы усыхания лесной растительности (год к году)",
+      "season": "summer",
+      "channels": ["B05", "B06"],
+      "preprocess": "pathology_diff",
+      "inputs": 2,
+      "min_area": 10000,
+      "cloud_mask_mode": "simple"
     },
     "overgrowth": {
       "description": "Границы зарастания сельхоз полей",
       "onnx_file": "overgrowth.onnx",
       "channels": ["B04", "B03", "B02"],
-      "poligons": ["pashni"],
+      "poligons-on": ["pashni"],
       "tile": 224,
       "bound": 0,
       "threshold": 0.45,
       "preprocess": "sentinel",
       "inputs": 1,
       "min_area": 0,
-      "simplify": 0
+      "simplify": 0,
+      "preserve_native_resolution": true
+    },
+    "water": {
+      "description": "Водоемы (тестово)",
+      "onnx_file": "water.onnx",
+      "channels": ["B02", "B03", "B04", "B08", "B11"],
+      "tile": 512,
+      "bound": 0,
+      "threshold": 0.5,
+      "preprocess": "sentinel2A",
+      "resolution": "R10m",
+      "inputs": 1,
+      "min_area": 10000,
+      "num_classes": 3,
+      "overlap": 32,
+      "detection_classes": [1, 2],
+      "preserve_native_resolution": true
+    },
+    "reforestation": {
+      "description": "Границы лесовосстановления",
+      "onnx_file": "reforestation.onnx",
+      "channels": ["B04", "B03", "B02"],
+      "tile": 448,
+      "bound": 0,
+      "preprocess": "sentinel",
+      "inputs": 1,
+      "num_classes": 3,
+      "detection_classes": [0],
+      "min_area": 100,
+      "simplify": 0,
+      "best_scene_per_tile": true,
+      "preserve_native_resolution": true,
+      "merge": false,
+      "mask_filter": {
+        "enabled": true,
+        "min_area": 200,
+        "connectivity": 4
+      }
+    },
+    "croptypes_yar": {
+      "description": "Границы полей с типом культур: Яровые",
+      "onnx_file": "croptypes.onnx",
+      "channels": ["NDVI1", "NDVI2", "NDVI3", "NDVI4", "NDVI5", "NDVI6", "NDVI7", "NDVI8", "NDVI9", "NDVI10", "NDVI11", "NDVI12"],
+      "tile": 512,
+      "bound": 0,
+      "preprocess": "identity",
+      "inputs": 1,
+      "num_classes": 4,
+      "detection_classes": [1],
+      "min_area": 100,
+      "simplify": 0,
+      "best_scene_per_tile": true,
+      "merge": false,
+      "mask_filter": {
+        "enabled": true,
+        "min_area": 200,
+        "connectivity": 4
+      },
+      "preserve_native_resolution": true
+    },
+    "croptypes_ozi": {
+      "description": "Границы полей с типом культур: Озимые",
+      "onnx_file": "croptypes.onnx",
+      "channels": ["NDVI1", "NDVI2", "NDVI3", "NDVI4", "NDVI5", "NDVI6", "NDVI7", "NDVI8", "NDVI9", "NDVI10", "NDVI11", "NDVI12"],
+      "tile": 512,
+      "bound": 0,
+      "preprocess": "identity",
+      "inputs": 1,
+      "num_classes": 4,
+      "detection_classes": [2],
+      "min_area": 100,
+      "simplify": 0,
+      "best_scene_per_tile": true,
+      "merge": false,
+      "mask_filter": {
+        "enabled": true,
+        "min_area": 200,
+        "connectivity": 4
+      },
+      "preserve_native_resolution": true
+    },
+    "croptypes_kor": {
+      "description": "Границы полей с типом культур: Кормовые",
+      "onnx_file": "croptypes.onnx",
+      "channels": ["NDVI1", "NDVI2", "NDVI3", "NDVI4", "NDVI5", "NDVI6", "NDVI7", "NDVI8", "NDVI9", "NDVI10", "NDVI11", "NDVI12"],
+      "tile": 512,
+      "bound": 0,
+      "preprocess": "identity",
+      "inputs": 1,
+      "num_classes": 4,
+      "detection_classes": [3],
+      "min_area": 100,
+      "simplify": 0,
+      "best_scene_per_tile": true,
+      "merge": false,
+      "mask_filter": {
+        "enabled": true,
+        "min_area": 200,
+        "connectivity": 4
+      },
+      "preserve_native_resolution": true
     }
   }
 }

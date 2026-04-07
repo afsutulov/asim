@@ -24,6 +24,11 @@ func clip01(x float32) float32 {
 }
 
 func preprocessBySpec(v float32, spec ModelSpec) float32 {
+	// identity: данные уже в правильном диапазоне, не трогаем.
+	mode := strings.ToLower(strings.TrimSpace(spec.Preprocess))
+	if mode == "identity" {
+		return v
+	}
 	if v < 0 {
 		v = 0
 	}
@@ -125,6 +130,33 @@ func collectAllowedTiles(tiles []SafeTile, allowedGeom Geometry, allowedEnv Enve
 	return allowed, skipped
 }
 
+// selectBestScenePerTile выбирает для каждого tile_id один снимок:
+// с минимальной облачностью; при равной — самый поздний по дате.
+// Это воспроизводит логику kosmo: из нескольких снимков одного тайла
+// за период строилась мозаика, а не прогонялся каждый независимо.
+// Один снимок на тайл устраняет артефакты от union разных дат.
+func selectBestScenePerTile(tiles []SafeTile) []SafeTile {
+	best := make(map[string]SafeTile)
+	for _, tile := range tiles {
+		cur, ok := best[tile.TileID]
+		if !ok {
+			best[tile.TileID] = tile
+			continue
+		}
+		// Предпочитаем меньше облаков; при равной облачности — более позднюю дату.
+		if tile.Cloud < cur.Cloud ||
+			(tile.Cloud == cur.Cloud && tileTime(tile).After(tileTime(cur))) {
+			best[tile.TileID] = tile
+		}
+	}
+	out := make([]SafeTile, 0, len(best))
+	for _, tile := range best {
+		out = append(out, tile)
+	}
+	sortTiles(out)
+	return out
+}
+
 func tileNamesForLog(tiles []SafeTile) string {
 	if len(tiles) == 0 {
 		return ""
@@ -137,8 +169,110 @@ func tileNamesForLog(tiles []SafeTile) string {
 	return strings.Join(names, ", ")
 }
 
+func isNDVITimeSeriesSpec(spec ModelSpec) bool {
+	if strings.ToLower(strings.TrimSpace(spec.Preprocess)) != "identity" {
+		return false
+	}
+	if len(spec.Channels) == 0 {
+		return false
+	}
+	for _, ch := range spec.Channels {
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ch)), "NDVI") {
+			return false
+		}
+	}
+	return true
+}
+
+func runNDVITimeSeriesPeriod(cfg ProcessConfig, allowedGeom Geometry, start, end string, cloud float64, workDir string) (periodRunResult, error) {
+	primaryTiles, err := loadTilesForCfg(cfg.CashPath, rootForSpec(cfg.App, cfg.Spec), start, end, cloud)
+	if err != nil {
+		return periodRunResult{}, err
+	}
+	stats := ProcessStats{PrimaryCandidates: len(primaryTiles)}
+	if len(primaryTiles) == 0 {
+		return periodRunResult{stats: stats}, fmt.Errorf("no Sentinel-2 tiles found in period %s..%s", start, end)
+	}
+	allowedEnv := GeometryEnvelope(allowedGeom)
+	filteredTiles, skippedOutside := collectAllowedTiles(primaryTiles, allowedGeom, allowedEnv)
+	stats.TileFootprintsSeen = len(primaryTiles)
+	stats.TilesSkippedOutside = skippedOutside
+	byTile := make(map[string][]SafeTile)
+	for _, tile := range filteredTiles {
+		byTile[tile.TileID] = append(byTile[tile.TileID], tile)
+	}
+	selectedIDs := make([]string, 0, len(byTile))
+	for id := range byTile {
+		selectedIDs = append(selectedIDs, id)
+	}
+	sort.Strings(selectedIDs)
+	selectedNames := make([]string, 0, len(selectedIDs))
+	for _, id := range selectedIDs {
+		latest := byTile[id][0]
+		for _, t := range byTile[id][1:] {
+			if tileTime(t).After(tileTime(latest)) {
+				latest = t
+			}
+		}
+		selectedNames = append(selectedNames, tileLabel(latest))
+	}
+	log.Printf("tiles selected for processing: count=%d names=[%s]", len(selectedIDs), strings.Join(selectedNames, ", "))
+
+	sess, err := NewORTSession(cfg.App.ModelPath(cfg.Spec), cfg.Device, cfg.CudaDeviceID)
+	if err != nil {
+		return periodRunResult{}, err
+	}
+	defer sess.Close()
+
+	mergedShp := filepath.Join(workDir, fmt.Sprintf("%s_single_merged.shp", cfg.Spec.Name))
+	_ = os.Remove(mergedShp)
+	progress := newProgressLogger(len(selectedIDs))
+	doneTiles := 0
+	for _, id := range selectedIDs {
+		cube, err := BuildNDVITimeSeriesCube(byTile[id], cfg.Spec, start, end)
+		if err != nil {
+			stats.TilesReadErrors++
+			log.Printf("tile read error %s: %v", id, err)
+			doneTiles++
+			progress.Update(doneTiles)
+			continue
+		}
+		stats.TilesProcessed++
+		stats.ModelRuns++
+		shp, err := RunModelOnCubes([]*RasterCube{cube}, sess, cfg.BatchSize, cfg.Spec, workDir, cfg.MinArea, cfg.Simplify)
+		if err != nil {
+			stats.ModelErrors++
+			log.Printf("model error %s: %v", id, err)
+			doneTiles++
+			progress.Update(doneTiles)
+			continue
+		}
+		if err := AppendShapefileFeaturesClipped(shp, allowedGeom, mergedShp); err != nil {
+			log.Printf("merge error %s: %v", id, err)
+		}
+		CleanupShapefileSet(shp)
+		doneTiles++
+		progress.Update(doneTiles)
+	}
+	if _, err := os.Stat(mergedShp); err != nil {
+		return periodRunResult{stats: stats}, fmt.Errorf("no polygons found for period %s..%s", start, end)
+	}
+	if !cfg.Spec.Merge {
+		log.Printf("dissolve skipped (merge=false): %s", cfg.Spec.Name)
+		return periodRunResult{shpPath: mergedShp, stats: stats}, nil
+	}
+	log.Printf("dissolve start: %s", cfg.Spec.Name)
+	dissolvedShp := filepath.Join(workDir, fmt.Sprintf("%s_single_dissolved.shp", cfg.Spec.Name))
+	if err := DissolveOverlappingPolygons(mergedShp, dissolvedShp); err != nil {
+		log.Printf("dissolve warning (using undissolved): %v", err)
+		dissolvedShp = mergedShp
+	}
+	log.Printf("dissolve done: %s", cfg.Spec.Name)
+	return periodRunResult{shpPath: dissolvedShp, stats: stats}, nil
+}
+
 func RunProcess(cfg ProcessConfig) (string, ProcessStats, error) {
-	allowedGeom, err := BuildAllowedGeometry(cfg.App, cfg.SearchPolygon, cfg.Spec.Poligons)
+	allowedGeom, err := BuildAllowedGeometry(cfg.App, cfg.SearchPolygon, cfg.Spec.PoligonsOn, cfg.Spec.PoligonsOff)
 	if err != nil {
 		return "", ProcessStats{}, err
 	}
@@ -152,7 +286,24 @@ func RunProcess(cfg ProcessConfig) (string, ProcessStats, error) {
 
 	var finalShp string
 	var stats ProcessStats
-	if cfg.Spec.Inputs > 1 {
+	if strings.EqualFold(cfg.Spec.Preprocess, "pathology_diff") {
+		// Сравнение год к году: только новые очаги, которых не было в базовом периоде.
+		res, err := runForestPathologyDiffPeriod(cfg, allowedGeom, workDir)
+		if err != nil {
+			return "", ProcessStats{}, err
+		}
+		finalShp = res.shpPath
+		stats = res.stats
+	} else if strings.EqualFold(cfg.Spec.Preprocess, "pathology") {
+		// Статистический алгоритм VOG1: воспроизводит kosmo PathologyPipeline.
+		// Нейронная сеть не используется, ONNX не нужен.
+		res, err := runForestPathologyPeriod(cfg, allowedGeom, workDir)
+		if err != nil {
+			return "", ProcessStats{}, err
+		}
+		finalShp = res.shpPath
+		stats = res.stats
+	} else if cfg.Spec.Inputs > 1 {
 		res, err := runPairedPeriods(cfg, allowedGeom, workDir)
 		if err != nil {
 			return "", ProcessStats{}, err
@@ -160,7 +311,12 @@ func RunProcess(cfg ProcessConfig) (string, ProcessStats, error) {
 		finalShp = res.shpPath
 		stats = res.stats
 	} else {
-		res, err := runSinglePeriod(cfg, allowedGeom, cfg.Start, cfg.End, cfg.Cloud, workDir)
+		var res periodRunResult
+		if isNDVITimeSeriesSpec(cfg.Spec) {
+			res, err = runNDVITimeSeriesPeriod(cfg, allowedGeom, cfg.Start, cfg.End, cfg.Cloud, workDir)
+		} else {
+			res, err = runSinglePeriod(cfg, allowedGeom, cfg.Start, cfg.End, cfg.Cloud, workDir)
+		}
 		if err != nil {
 			return "", ProcessStats{}, err
 		}
@@ -205,7 +361,7 @@ func RunProcess(cfg ProcessConfig) (string, ProcessStats, error) {
 }
 
 func runSinglePeriod(cfg ProcessConfig, allowedGeom Geometry, start, end string, cloud float64, workDir string) (periodRunResult, error) {
-	primaryTiles, err := loadTilesForCfg(cfg.CashPath, cfg.App.Sentinel, start, end, cloud)
+	primaryTiles, err := loadTilesForCfg(cfg.CashPath, rootForSpec(cfg.App, cfg.Spec), start, end, cloud)
 	if err != nil {
 		return periodRunResult{}, err
 	}
@@ -226,11 +382,16 @@ func runSinglePeriod(cfg ProcessConfig, allowedGeom Geometry, start, end string,
 	filteredTiles, skippedOutside := collectAllowedTiles(primaryTiles, allowedGeom, allowedEnv)
 	stats.TileFootprintsSeen = len(primaryTiles)
 	stats.TilesSkippedOutside = skippedOutside
+	if cfg.Spec.BestScenePerTile {
+		before := len(filteredTiles)
+		filteredTiles = selectBestScenePerTile(filteredTiles)
+		log.Printf("best_scene_per_tile: reduced %d -> %d tiles", before, len(filteredTiles))
+	}
 	log.Printf("tiles selected for processing: count=%d names=[%s]", len(filteredTiles), tileNamesForLog(filteredTiles))
 	progress := newProgressLogger(len(filteredTiles))
 	doneTiles := 0
 	for _, tile := range filteredTiles {
-		cube1, err := ReadSentinelTileCube(tile, cfg.Spec.Channels)
+		cube1, err := ReadSentinelTileCubeWithSpec(tile, cfg.Spec.Channels, cfg.Spec.CloudMaskMode, cfg.Spec)
 		if err != nil {
 			stats.TilesReadErrors++
 			log.Printf("tile read error %s: %v", tileLabel(tile), err)
@@ -258,15 +419,29 @@ func runSinglePeriod(cfg ProcessConfig, allowedGeom Geometry, start, end string,
 	if _, err := os.Stat(mergedShp); err != nil {
 		return periodRunResult{stats: stats}, fmt.Errorf("no polygons found for period %s..%s", start, end)
 	}
-	return periodRunResult{shpPath: mergedShp, stats: stats}, nil
+	if !cfg.Spec.Merge {
+		log.Printf("dissolve skipped (merge=false): %s", cfg.Spec.Name)
+		return periodRunResult{shpPath: mergedShp, stats: stats}, nil
+	}
+	// Dissolve: объединяем перекрывающиеся полигоны на стыках Sentinel-тайлов.
+	// Без этого на стыке двух тайлов один и тот же участок земли может быть
+	// покрыт полигонами от обоих тайлов -> видны "квадратные" артефакты.
+	log.Printf("dissolve start: %s", cfg.Spec.Name)
+	dissolvedShp := filepath.Join(workDir, fmt.Sprintf("%s_single_dissolved.shp", cfg.Spec.Name))
+	if err := DissolveOverlappingPolygons(mergedShp, dissolvedShp); err != nil {
+		log.Printf("dissolve warning (using undissolved): %v", err)
+		dissolvedShp = mergedShp
+	}
+	log.Printf("dissolve done: %s", cfg.Spec.Name)
+	return periodRunResult{shpPath: dissolvedShp, stats: stats}, nil
 }
 
 func runPairedPeriods(cfg ProcessConfig, allowedGeom Geometry, workDir string) (periodRunResult, error) {
-	newTiles, err := loadTilesForCfg(cfg.CashPath, cfg.App.Sentinel, cfg.Start, cfg.End, cfg.Cloud)
+	newTiles, err := loadTilesForCfg(cfg.CashPath, rootForSpec(cfg.App, cfg.Spec), cfg.Start, cfg.End, cfg.Cloud)
 	if err != nil {
 		return periodRunResult{}, err
 	}
-	baseTiles, err := loadTilesForCfg(cfg.CashPath, cfg.App.Sentinel, cfg.Start2, cfg.End2, cfg.Cloud)
+	baseTiles, err := loadTilesForCfg(cfg.CashPath, rootForSpec(cfg.App, cfg.Spec), cfg.Start2, cfg.End2, cfg.Cloud)
 	if err != nil {
 		return periodRunResult{}, err
 	}
@@ -338,7 +513,7 @@ func runPairedPeriods(cfg ProcessConfig, allowedGeom Geometry, workDir string) (
 		older := pair.older
 		newer := pair.newer
 
-		cubeOlder, err := ReadSentinelTileCube(older, cfg.Spec.Channels)
+		cubeOlder, err := ReadSentinelTileCubeWithSpec(older, cfg.Spec.Channels, cfg.Spec.CloudMaskMode, cfg.Spec)
 		if err != nil {
 			stats.TilesReadErrors++
 			log.Printf("tile read error %s: %v", tileLabel(older), err)
@@ -346,7 +521,7 @@ func runPairedPeriods(cfg ProcessConfig, allowedGeom Geometry, workDir string) (
 			progress.Update(doneTiles)
 			continue
 		}
-		cubeNewer, err := ReadSentinelTileCube(newer, cfg.Spec.Channels)
+		cubeNewer, err := ReadSentinelTileCubeWithSpec(newer, cfg.Spec.Channels, cfg.Spec.CloudMaskMode, cfg.Spec)
 		if err != nil {
 			stats.TilesReadErrors++
 			log.Printf("tile read error %s: %v", tileLabel(newer), err)
@@ -365,45 +540,134 @@ func runPairedPeriods(cfg ProcessConfig, allowedGeom Geometry, workDir string) (
 		stats.TilesProcessed += 2
 		stats.ModelRuns++
 
-		shp, err := RunModelOnCubes([]*RasterCube{cubeOlder, cubeNewer}, sess, cfg.BatchSize, cfg.Spec, workDir, cfg.MinArea, cfg.Simplify)
-		if err != nil {
-			stats.ModelErrors++
-			log.Printf("model error %s/%s: %v", tileLabel(older), tileLabel(newer), err)
-			doneTiles += 2
-			progress.Update(doneTiles)
-			continue
+		var shp string
+		switch cfg.Spec.effectivePairMode() {
+		case "newer_only":
+			// Модель принимает один снимок; второй период используется только
+			// для выбора базовой сцены (pickBaseTileForNewer), в inference не идёт.
+			shp, err = RunModelOnCubes([]*RasterCube{cubeNewer}, sess, cfg.BatchSize, cfg.Spec, workDir, cfg.MinArea, cfg.Simplify)
+			if err != nil {
+				stats.ModelErrors++
+				log.Printf("model error %s: %v", tileLabel(newer), err)
+				doneTiles += 2
+				progress.Update(doneTiles)
+				continue
+			}
+			if err := AppendShapefileFeaturesClipped(shp, allowedGeom, mergedShp); err != nil {
+				log.Printf("merge error %s: %v", tileLabel(newer), err)
+			}
+			CleanupShapefileSet(shp)
+		case "union":
+			// Каждый снимок прогоняется через модель независимо,
+			// результаты объединяются union-ом полигонов.
+			// Используем отдельные подкаталоги чтобы избежать коллизии имён файлов.
+			workOlder := filepath.Join(workDir, "older")
+			workNewer := filepath.Join(workDir, "newer")
+			_ = os.MkdirAll(workOlder, 0o755)
+			_ = os.MkdirAll(workNewer, 0o755)
+			shpOlder, err1 := RunModelOnCubes([]*RasterCube{cubeOlder}, sess, cfg.BatchSize, cfg.Spec, workOlder, cfg.MinArea, cfg.Simplify)
+			shpNewer, err2 := RunModelOnCubes([]*RasterCube{cubeNewer}, sess, cfg.BatchSize, cfg.Spec, workNewer, cfg.MinArea, cfg.Simplify)
+			switch {
+			case err1 != nil && err2 != nil:
+				err = fmt.Errorf("both cubes failed: older=%v newer=%v", err1, err2)
+			case err1 == nil && err2 == nil:
+				if err := AppendShapefileFeaturesClipped(shpOlder, allowedGeom, mergedShp); err != nil {
+					log.Printf("merge error older %s: %v", tileLabel(older), err)
+				}
+				CleanupShapefileSet(shpOlder)
+				if err := AppendShapefileFeaturesClipped(shpNewer, allowedGeom, mergedShp); err != nil {
+					log.Printf("merge error newer %s: %v", tileLabel(newer), err)
+				}
+				CleanupShapefileSet(shpNewer)
+			case err1 == nil:
+				shp = shpOlder
+				CleanupShapefileSet(shpNewer)
+			default:
+				shp = shpNewer
+				CleanupShapefileSet(shpOlder)
+			}
+			if err != nil {
+				stats.ModelErrors++
+				log.Printf("model error %s/%s: %v", tileLabel(older), tileLabel(newer), err)
+				doneTiles += 2
+				progress.Update(doneTiles)
+				continue
+			}
+			if shp != "" {
+				if err := AppendShapefileFeaturesClipped(shp, allowedGeom, mergedShp); err != nil {
+					log.Printf("merge error %s: %v", tileLabel(older), err)
+				}
+				CleanupShapefileSet(shp)
+			}
+		default: // "concat"
+			// Каналы обоих снимков конкатенируются и подаются в модель единым тензором.
+			shp, err = RunModelOnCubes([]*RasterCube{cubeOlder, cubeNewer}, sess, cfg.BatchSize, cfg.Spec, workDir, cfg.MinArea, cfg.Simplify)
+			if err != nil {
+				stats.ModelErrors++
+				log.Printf("model error %s/%s: %v", tileLabel(older), tileLabel(newer), err)
+				doneTiles += 2
+				progress.Update(doneTiles)
+				continue
+			}
+			if err := AppendShapefileFeaturesClipped(shp, allowedGeom, mergedShp); err != nil {
+				log.Printf("merge error %s/%s: %v", tileLabel(older), tileLabel(newer), err)
+			}
+			CleanupShapefileSet(shp)
 		}
-		if err := AppendShapefileFeaturesClipped(shp, allowedGeom, mergedShp); err != nil {
-			log.Printf("merge error %s/%s: %v", tileLabel(older), tileLabel(newer), err)
-		}
-		CleanupShapefileSet(shp)
 		doneTiles += 2
 		progress.Update(doneTiles)
 	}
 	if _, err := os.Stat(mergedShp); err != nil {
 		return periodRunResult{stats: stats}, fmt.Errorf("no polygons found for paired periods")
 	}
-	return periodRunResult{shpPath: mergedShp, stats: stats}, nil
+	if !cfg.Spec.Merge {
+		log.Printf("dissolve skipped (merge=false): %s", cfg.Spec.Name)
+		return periodRunResult{shpPath: mergedShp, stats: stats}, nil
+	}
+	log.Printf("dissolve start: %s", cfg.Spec.Name)
+	dissolvedShp := filepath.Join(workDir, fmt.Sprintf("%s_paired_dissolved.shp", cfg.Spec.Name))
+	if err := DissolveOverlappingPolygons(mergedShp, dissolvedShp); err != nil {
+		log.Printf("dissolve warning (using undissolved): %v", err)
+		dissolvedShp = mergedShp
+	}
+	log.Printf("dissolve done: %s", cfg.Spec.Name)
+	return periodRunResult{shpPath: dissolvedShp, stats: stats}, nil
 }
 
 func pickBaseTileForNewer(newer SafeTile, baseCandidates []SafeTile) (SafeTile, bool) {
 	if len(baseCandidates) == 0 {
 		return SafeTile{}, false
 	}
-	newerTime := tileTime(newer)
-	var picked SafeTile
-	found := false
+	// Воспроизводим логику kosmo (_get_base_image):
+	// 1. Фильтруем: base строго раньше newer (хотя бы на 1 день)
+	// 2. Сортируем по дате descending → берём первый (самый свежий)
+	// Если строго ранних нет (периоды пересекаются или одинаковые) —
+	// берём самый свежий из всех (best-effort).
+	var candidates []SafeTile
 	for _, base := range baseCandidates {
-		baseTime := tileTime(base)
-		if newerTime.Sub(baseTime) < 24*time.Hour {
-			continue
-		}
-		if !found || baseTime.After(tileTime(picked)) {
-			picked = base
-			found = true
+		if tileTime(base).Before(tileTime(newer)) {
+			candidates = append(candidates, base)
 		}
 	}
-	return picked, found
+	if len(candidates) == 0 {
+		// Нет строго ранних — берём всех (периоды заданы некорректно)
+		candidates = baseCandidates
+	}
+	// Самый свежий из кандидатов (как в kosmo: sort desc → [0])
+	picked := candidates[0]
+	for _, base := range candidates[1:] {
+		if tileTime(base).After(tileTime(picked)) {
+			picked = base
+		}
+	}
+	return picked, true
+}
+
+func rootForSpec(app *AppConfig, spec ModelSpec) string {
+	if normalizePreprocess(spec.Preprocess) == "sentinel2a" && strings.TrimSpace(app.Sentinel2A) != "" {
+		return app.Sentinel2A
+	}
+	return app.Sentinel
 }
 
 func loadTilesForCfg(cashPath, sentinelRoot, start, end string, cloud float64) ([]SafeTile, error) {
@@ -431,20 +695,48 @@ func RunModelOnCubes(cubes []*RasterCube, sess *ORTSession, batchSize int, spec 
 	}
 	base := cubes[0]
 	img := combineInputs(cubes)
+	// Строим маску валидных пикселей для всех режимов.
 	validMask := combineValidMasks(cubes)
+
 	if len(img) == 0 || len(img[0]) == 0 || len(img[0][0]) == 0 || len(img[0][0][0]) == 0 {
 		return "", errors.New("empty input image")
 	}
 	h, w := len(img[0][0]), len(img[0][0][0])
-	out := make([]float32, h*w)
-	tileH, tileW, bound := spec.Tile, spec.Tile, spec.Bound
-	stepY, stepX := tileH-2*bound, tileW-2*bound
+
+	// Определяем шаг тайла.
+	// Для многоклассовых моделей используется overlap (как в kosmo forest_disease_v3),
+	// для остальных — bound.
+	tileH, tileW := spec.Tile, spec.Tile
+	var stepY, stepX int
+	if spec.IsMulticlass() && spec.Overlap > 0 {
+		stepY = tileH - spec.Overlap
+		stepX = tileW - spec.Overlap
+	} else {
+		bound := spec.Bound
+		stepY = tileH - 2*bound
+		stepX = tileW - 2*bound
+	}
 	if stepY <= 0 || stepX <= 0 {
-		return "", fmt.Errorf("invalid bound=%d for tile=%d", bound, tileH)
+		return "", fmt.Errorf("invalid step: tile=%d bound=%d overlap=%d", tileH, spec.Bound, spec.Overlap)
 	}
 	inChannels := len(img)
 
-	type tileMeta struct{ dstY0, dstY1, dstX0, dstX1, srcY0, srcX0 int }
+	// Для многоклассовой модели накапливаем вероятности по всем классам.
+	numClasses := spec.NumClasses
+	if numClasses < 1 {
+		numClasses = 1
+	}
+	// out: для бинарных — float32 маска [h*w], для многоклассовых — накопленные
+	// вероятности [numClasses*h*w] и счётчики [h*w].
+	out := make([]float32, h*w)
+	var multiOut []float32   // накопленные logits/probs [numClasses*h*w]
+	var multiCount []float32 // счётчик вкладов каждого пикселя [h*w]
+	if spec.IsMulticlass() {
+		multiOut = make([]float32, numClasses*h*w)
+		multiCount = make([]float32, h*w)
+	}
+
+	type tileMeta struct{ dstY0, dstY1, dstX0, dstX1, srcY0, srcX0, realH, realW int }
 	var metas []tileMeta
 	var batchInput []float32
 	var batchValid []uint8
@@ -453,26 +745,57 @@ func RunModelOnCubes(cubes []*RasterCube, sess *ORTSession, batchSize int, spec 
 		if len(metas) == 0 {
 			return nil
 		}
-		preds, err := sess.Predict(batchInput, len(metas), inChannels, tileH, tileW, 1)
+		preds, err := sess.Predict(batchInput, len(metas), inChannels, tileH, tileW, numClasses)
 		if err != nil {
 			return err
 		}
 		pixelCount := tileH * tileW
 		for bi, m := range metas {
-			baseOff := bi * pixelCount
-			for yy := m.dstY0; yy < m.dstY1; yy++ {
-				for xx := m.dstX0; xx < m.dstX1; xx++ {
-					py, px := (yy-m.dstY0)+m.srcY0, (xx-m.dstX0)+m.srcX0
-					pOff := py*tileW + px
-					vIdx := bi*pixelCount + pOff
-					if batchValid[vIdx] == 0 {
-						out[yy*w+xx] = 0
-						continue
+			if spec.IsMulticlass() {
+				// Многоклассовый: накапливаем predprobs для реальной области патча.
+				// Python: pred_patch_cropped = pred_patch_probs[:, :img_patch.shape[1], :img_patch.shape[2]]
+				//         prediction[:, y:y_end, x:x_end] += pred_patch_cropped
+				//         count[y:y_end, x:x_end] += 1.0
+				// Паддинговая зона (за realH/realW) и nodata-пиксели не суммируются.
+				for yy := m.dstY0; yy < m.dstY1; yy++ {
+					py := (yy - m.dstY0) + m.srcY0
+					if py >= m.realH {
+						break
 					}
-					if preds[baseOff+pOff] > spec.Threshold {
-						out[yy*w+xx] = 1
-					} else {
-						out[yy*w+xx] = 0
+					for xx := m.dstX0; xx < m.dstX1; xx++ {
+						px := (xx - m.dstX0) + m.srcX0
+						if px >= m.realW {
+							break
+						}
+						pOff := py*tileW + px
+						if batchValid[bi*pixelCount+pOff] == 0 {
+							continue
+						}
+						pixOut := yy*w + xx
+						multiCount[pixOut] += 1.0
+						for cl := 0; cl < numClasses; cl++ {
+							predIdx := bi*numClasses*pixelCount + cl*pixelCount + pOff
+							multiOut[cl*h*w+pixOut] += preds[predIdx]
+						}
+					}
+				}
+			} else {
+				// Бинарный: threshold
+				baseOff := bi * pixelCount
+				for yy := m.dstY0; yy < m.dstY1; yy++ {
+					for xx := m.dstX0; xx < m.dstX1; xx++ {
+						py, px := (yy-m.dstY0)+m.srcY0, (xx-m.dstX0)+m.srcX0
+						pOff := py*tileW + px
+						vIdx := bi*pixelCount + pOff
+						if batchValid[vIdx] == 0 {
+							out[yy*w+xx] = 0
+							continue
+						}
+						if preds[baseOff+pOff] > spec.Threshold {
+							out[yy*w+xx] = 1
+						} else {
+							out[yy*w+xx] = 0
+						}
 					}
 				}
 			}
@@ -481,22 +804,68 @@ func RunModelOnCubes(cubes []*RasterCube, sess *ORTSession, batchSize int, spec 
 		return nil
 	}
 
+	// channel_means: используются для заполнения nodata/padding пикселей
+	// (как interpolate_patch в Python). НЕ вычитаются из данных —
+	// модель обучена на TOA-нормированных данных без вычитания средних.
+	channelMeans := make([]float32, inChannels)
+	if len(spec.ChannelMeans) == inChannels {
+		for i, m := range spec.ChannelMeans {
+			channelMeans[i] = float32(m)
+		}
+	}
+	hasChannelMeans := len(spec.ChannelMeans) == inChannels
+
+	bound := spec.Bound
+
 	for y0 := 0; y0 < h; y0 += stepY {
 		for x0 := 0; x0 < w; x0 += stepX {
 			patch := make([]float32, inChannels*tileH*tileW)
 			valid := make([]uint8, tileH*tileW)
+			// realH/realW — реальный размер патча (без паддинга за краями)
+			realH := tileH
+			if y0+tileH > h {
+				realH = h - y0
+			}
+			realW := tileW
+			if x0+tileW > w {
+				realW = w - x0
+			}
 			for yy := 0; yy < tileH; yy++ {
 				sy := y0 + yy
 				if sy >= h {
+					// Паддинг за краем: заполняем channel_means (как Python nan_to_num(nan=1) → ~0.5)
+					if hasChannelMeans {
+						for xx := 0; xx < tileW; xx++ {
+							for c := 0; c < inChannels; c++ {
+								patch[c*tileH*tileW+yy*tileW+xx] = channelMeans[c]
+							}
+						}
+					}
 					continue
 				}
 				for xx := 0; xx < tileW; xx++ {
 					sx := x0 + xx
 					if sx >= w {
+						// Паддинг за краем по X
+						if hasChannelMeans {
+							for c := 0; c < inChannels; c++ {
+								patch[c*tileH*tileW+yy*tileW+xx] = channelMeans[c]
+							}
+						}
 						continue
 					}
 					pixIdx := sy*w + sx
-					if len(validMask) > 0 && validMask[pixIdx] == 0 {
+					isNodata := len(validMask) > 0 && validMask[pixIdx] == 0
+					if isNodata {
+						// Nodata внутри изображения: заполняем channel_means чтобы
+						// модель не получила нули/NaN в паддинге.
+						// valid=0 для всех режимов — nodata-пиксели не учитываются
+						// в postMask (бинарный) и не накапливаются в multiCount (multiclass).
+						if hasChannelMeans {
+							for c := 0; c < inChannels; c++ {
+								patch[c*tileH*tileW+yy*tileW+xx] = channelMeans[c]
+							}
+						}
 						continue
 					}
 					for c := 0; c < inChannels; c++ {
@@ -506,30 +875,39 @@ func RunModelOnCubes(cubes []*RasterCube, sess *ORTSession, batchSize int, spec 
 					valid[yy*tileW+xx] = 1
 				}
 			}
-			srcY0, srcY1 := bound, tileH-bound
-			srcX0, srcX1 := bound, tileW-bound
-			if y0 == 0 {
-				srcY0 = 0
-			}
-			if x0 == 0 {
-				srcX0 = 0
-			}
-			if y0+tileH >= h {
-				srcY1 = h - y0
-			}
-			if x0+tileW >= w {
-				srcX1 = w - x0
-			}
-			if srcY1 < srcY0 {
-				srcY1 = srcY0
-			}
-			if srcX1 < srcX0 {
-				srcX1 = srcX0
+			// Для многоклассовых (overlap): записываем весь тайл целиком,
+			// flush накапливает с count → итоговый argmax по среднему.
+			// Для бинарных (bound): отбрасываем граничную полосу.
+			var srcY0, srcY1, srcX0, srcX1 int
+			if spec.IsMulticlass() && spec.Overlap > 0 {
+				srcY0, srcY1 = 0, min(tileH, h-y0)
+				srcX0, srcX1 = 0, min(tileW, w-x0)
+			} else {
+				srcY0, srcY1 = bound, tileH-bound
+				srcX0, srcX1 = bound, tileW-bound
+				if y0 == 0 {
+					srcY0 = 0
+				}
+				if x0 == 0 {
+					srcX0 = 0
+				}
+				if y0+tileH >= h {
+					srcY1 = h - y0
+				}
+				if x0+tileW >= w {
+					srcX1 = w - x0
+				}
+				if srcY1 < srcY0 {
+					srcY1 = srcY0
+				}
+				if srcX1 < srcX0 {
+					srcX1 = srcX0
+				}
 			}
 			dstY0, dstY1 := y0+srcY0, min(y0+srcY1, h)
 			dstX0, dstX1 := x0+srcX0, min(x0+srcX1, w)
 
-			metas = append(metas, tileMeta{dstY0: dstY0, dstY1: dstY1, dstX0: dstX0, dstX1: dstX1, srcY0: srcY0, srcX0: srcX0})
+			metas = append(metas, tileMeta{dstY0: dstY0, dstY1: dstY1, dstX0: dstX0, dstX1: dstX1, srcY0: srcY0, srcX0: srcX0, realH: realH, realW: realW})
 			batchInput = append(batchInput, patch...)
 			batchValid = append(batchValid, valid...)
 
@@ -545,9 +923,69 @@ func RunModelOnCubes(cubes []*RasterCube, sess *ORTSession, batchSize int, spec 
 	}
 
 	maskTif := filepath.Join(tmpDir, spec.Name+"_mask.tif")
+	postMask := combineValidMasks(cubes)
+
+	if spec.IsMulticlass() {
+		// Строим множество классов-детекций из конфига.
+		// Если detection_classes не задан — детекция = любой класс > 0 (умолчание).
+		detectionSet := make(map[int]bool, len(spec.DetectionClasses))
+		for _, cl := range spec.DetectionClasses {
+			detectionSet[cl] = true
+		}
+		useDetectionSet := len(detectionSet) > 0
+
+		for i := 0; i < h*w; i++ {
+			if multiCount[i] == 0 {
+				out[i] = 0
+				continue
+			}
+			if len(postMask) > 0 && postMask[i] == 0 {
+				out[i] = 0
+				continue
+			}
+			// Argmax — класс с максимальным logit
+			bestCl := 0
+			bestVal := multiOut[0*h*w+i] / multiCount[i]
+			for cl := 1; cl < numClasses; cl++ {
+				v := multiOut[cl*h*w+i] / multiCount[i]
+				if v > bestVal {
+					bestVal = v
+					bestCl = cl
+				}
+			}
+			_ = bestVal
+			var isDetection bool
+			if useDetectionSet {
+				isDetection = detectionSet[bestCl]
+			} else {
+				isDetection = bestCl > 0
+			}
+			if isDetection {
+				out[i] = float32(bestCl)
+			} else {
+				out[i] = 0
+			}
+		}
+	} else {
+		// Бинарный: финальная маскировка nodata
+		if len(postMask) == len(out) {
+			for i := range out {
+				if postMask[i] == 0 {
+					out[i] = 0
+				}
+			}
+		}
+	}
+
+	if spec.MaskFilter.Enabled {
+		log.Printf("mask filter start: %s", spec.Name)
+		out = applyMaskFilter(out, w, h, spec.MaskFilter)
+		log.Printf("mask filter done: %s", spec.Name)
+	}
 	if err := WriteGeoTIFF1(maskTif, out, w, h, base.Geo, base.Proj); err != nil {
 		return "", err
 	}
+
 	defer os.Remove(maskTif)
 	return PolygonizeMask(maskTif, 1, minArea, simplify)
 }
@@ -624,7 +1062,6 @@ func zipDir(srcDir, zipPath string) error {
 	})
 }
 
-
 func CopyShapefileSet(srcShp, dstShp string) error {
 	srcBase := strings.TrimSuffix(srcShp, filepath.Ext(srcShp))
 	dstBase := strings.TrimSuffix(dstShp, filepath.Ext(dstShp))
@@ -641,13 +1078,21 @@ func CopyShapefileSet(srcShp, dstShp string) error {
 		}
 		dst := dstBase + ext
 		in, err := os.Open(src)
-		if err != nil { return err }
-		out, err := os.Create(dst)
-		if err != nil { in.Close(); return err }
-		if _, err := io.Copy(out, in); err != nil {
-			out.Close(); in.Close(); return err
+		if err != nil {
+			return err
 		}
-		out.Close(); in.Close()
+		out, err := os.Create(dst)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			in.Close()
+			return err
+		}
+		out.Close()
+		in.Close()
 	}
 	return nil
 }
