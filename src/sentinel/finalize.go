@@ -9,47 +9,36 @@ package main
 //   - если Preprocess пустой, ставим "sentinel"
 //   - Inputs по умолчанию 1
 //   - NumClasses по умолчанию 1 (бинарная модель)
-//   - Divisor по умолчанию 10000, но может быть переопределён ранее
-//   - Merge по умолчанию true для обратной совместимости
+//   - Divisor по умолчанию 10000
+//   - Merge берётся напрямую из config.json: true включает dissolve, false (и отсутствие поля) — нет
 func FinalizeSpec(m ModelSpec) ModelSpec {
-	if m.ONNXFile == "" && m.Name != "" {
-		m.ONNXFile = m.Name + ".onnx"
-	}
-	if m.Tile <= 0 {
-		m.Tile = 256
-	}
-	if m.Bound < 0 {
-		m.Bound = 0
-	}
-	if m.Threshold == 0 {
-		m.Threshold = 0.5
-	}
-	if m.Preprocess == "" {
-		m.Preprocess = "sentinel"
-	}
-	if m.Resolution == "" {
-		m.Resolution = "R10m"
-	}
-	if m.Inputs <= 0 {
-		m.Inputs = 1
-	}
-	if m.NumClasses <= 0 {
-		m.NumClasses = 1
-	}
-	if m.MaskFilter.Connectivity != 8 {
-		m.MaskFilter.Connectivity = 4
-	}
-	// По умолчанию оставляем историческое поведение: dissolve включён.
-	// Так как bool в JSON не позволяет отличить "не задано" от false,
-	// используем безопасное правило: для reforestation/croptypes merge по умолчанию false,
-	// для остальных моделей — true.
-	if !m.Merge {
-		if m.Name != "reforestation" && m.Name != "croptypes" {
-			m.Merge = true
-		}
-	} else {
-		m.Merge = true
-	}
-	m.Divisor = 10000
-	return m
+    if m.ONNXFile == "" && m.Name != "" {
+	m.ONNXFile = m.Name + ".onnx"
+    }
+    if m.Tile <= 0 {
+	m.Tile = 256
+    }
+    if m.Bound < 0 {
+	m.Bound = 0
+    }
+    if m.Threshold == 0 {
+	m.Threshold = 0.5
+    }
+    if m.Preprocess == "" {
+	m.Preprocess = "sentinel"
+    }
+    if m.Resolution == "" {
+	m.Resolution = "R10m"
+    }
+    if m.Inputs <= 0 {
+	m.Inputs = 1
+    }
+    if m.NumClasses <= 0 {
+	m.NumClasses = 1
+    }
+    if m.MaskFilter.Connectivity != 8 {
+	m.MaskFilter.Connectivity = 4
+    }
+    m.Divisor = 10000
+    return m
 }

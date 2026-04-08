@@ -24,7 +24,7 @@
       "min_area": 100,
       "inputs": 1,
       "preserve_native_resolution": true,
-      "merge": false
+      "merge": true
     },
     "fire": {
       "description": "Гари",

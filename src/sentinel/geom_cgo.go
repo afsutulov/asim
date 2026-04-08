@@ -42,7 +42,7 @@ type Envelope struct {
 func GeometryEnvelope(g Geometry) Envelope {
     var e Envelope
     if g == nil {
-	return e
+    return e
     }
     var env C.OGREnvelope
     C.OGR_G_GetEnvelope(g, &env)
@@ -60,13 +60,13 @@ func EnvelopeIntersects(a Envelope, b [4]float64) bool {
 func initGeom() { C._gdal_init_geom_once() }
 func DestroyGeometry(g Geometry) {
     if g != nil {
-	C.OGR_G_DestroyGeometry(g)
+    C.OGR_G_DestroyGeometry(g)
     }
 }
 
 func cloneGeom(g Geometry) Geometry {
     if g == nil {
-	return nil
+    return nil
     }
     return C.OGR_G_Clone(g)
 }
@@ -75,25 +75,25 @@ func GeometryIntersects(a, b Geometry) bool {
 }
 func GeometryIntersection(a, b Geometry) Geometry {
     if a == nil || b == nil {
-	return nil
+    return nil
     }
     return C.OGR_G_Intersection(a, b)
 }
 func GeometryUnion(a, b Geometry) Geometry {
     if a == nil {
-	return cloneGeom(b)
+    return cloneGeom(b)
     }
     if b == nil {
-	return cloneGeom(a)
+    return cloneGeom(a)
     }
     return C.OGR_G_Union(a, b)
 }
 func GeometryDifference(a, b Geometry) Geometry {
     if a == nil {
-	return nil
+    return nil
     }
     if b == nil {
-	return cloneGeom(a)
+    return cloneGeom(a)
     }
     return C.OGR_G_Difference(a, b)
 }
@@ -115,64 +115,64 @@ func loadUnionGeometryWithSRS(path string) (Geometry, C.OGRSpatialReferenceH, er
     defer C.free(unsafe.Pointer(cp))
     ds := C.GDALOpenEx(cp, C.GDAL_OF_VECTOR, nil, nil, nil)
     if ds == nil {
-	return nil, nil, fmt.Errorf("open vector: %s", path)
+    return nil, nil, fmt.Errorf("open vector: %s", path)
     }
     defer C.GDALClose(ds)
     layer := C.GDALDatasetGetLayer(ds, 0)
     if layer == nil {
-	return nil, nil, fmt.Errorf("layer 0 not found: %s", path)
+    return nil, nil, fmt.Errorf("layer 0 not found: %s", path)
     }
     var srs C.OGRSpatialReferenceH
     lsrs := C.OGR_L_GetSpatialRef(layer)
     if lsrs != nil {
-	srs = C.OSRClone(lsrs)
-	C._set_traditional_gis_order(srs)
+    srs = C.OSRClone(lsrs)
+    C._set_traditional_gis_order(srs)
     }
     C.OGR_L_ResetReading(layer)
     var acc Geometry
     for {
-	feat := C.OGR_L_GetNextFeature(layer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom != nil {
-	    ug := GeometryUnion(acc, geom)
-	    if acc != nil {
-		DestroyGeometry(acc)
-	    }
-	    acc = ug
-	}
-	C.OGR_F_Destroy(feat)
+    feat := C.OGR_L_GetNextFeature(layer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom != nil {
+        ug := GeometryUnion(acc, geom)
+        if acc != nil {
+	DestroyGeometry(acc)
+        }
+        acc = ug
+    }
+    C.OGR_F_Destroy(feat)
     }
     if acc == nil {
-	acc = C._empty_multi_polygon()
+    acc = C._empty_multi_polygon()
     }
     return acc, srs, nil
 }
 
 func reprojectGeometryToWGS84(g Geometry, srcSRS C.OGRSpatialReferenceH) (Geometry, error) {
     if g == nil {
-	return nil, nil
+    return nil, nil
     }
     if srcSRS == nil {
-	return cloneGeom(g), nil
+    return cloneGeom(g), nil
     }
     C._set_traditional_gis_order(srcSRS)
     dst := newEPSG4326SRS()
     defer C.OSRDestroySpatialReference(dst)
     ct := C.OCTNewCoordinateTransformation(srcSRS, dst)
     if ct == nil {
-	return nil, fmt.Errorf("create coordinate transformation to WGS84 failed")
+    return nil, fmt.Errorf("create coordinate transformation to WGS84 failed")
     }
     defer C.OCTDestroyCoordinateTransformation(ct)
     cg := cloneGeom(g)
     if cg == nil {
-	return nil, fmt.Errorf("clone geometry failed")
+    return nil, fmt.Errorf("clone geometry failed")
     }
     if C.OGR_G_Transform(cg, ct) != 0 {
-	DestroyGeometry(cg)
-	return nil, fmt.Errorf("geometry transform to WGS84 failed")
+    DestroyGeometry(cg)
+    return nil, fmt.Errorf("geometry transform to WGS84 failed")
     }
     return cg, nil
 }
@@ -180,15 +180,15 @@ func reprojectGeometryToWGS84(g Geometry, srcSRS C.OGRSpatialReferenceH) (Geomet
 func LoadUnionGeometryFromVector(path string) (Geometry, error) {
     g, srs, err := loadUnionGeometryWithSRS(path)
     if srs != nil {
-	defer C.OSRDestroySpatialReference(srs)
+    defer C.OSRDestroySpatialReference(srs)
     }
     if err != nil {
-	return nil, err
+    return nil, err
     }
     wg, err := reprojectGeometryToWGS84(g, srs)
     DestroyGeometry(g)
     if err != nil {
-	return nil, err
+    return nil, err
     }
     return wg, nil
 }
@@ -196,51 +196,51 @@ func LoadUnionGeometryFromVector(path string) (Geometry, error) {
 func BuildAllowedGeometry(cfg *AppConfig, searchPolygon string, poligonsOn []string, poligonsOff []string) (Geometry, error) {
     path, err := cfg.PolygonPath(searchPolygon)
     if err != nil {
-	return nil, err
+    return nil, err
     }
     allowed, err := LoadUnionGeometryFromVector(path)
     if err != nil {
-	return nil, err
+    return nil, err
     }
     // poligons-on: пересечение с каждым — результат должен попадать в них.
     for _, name := range poligonsOn {
-	b, err := cfg.PolygonPath(name)
-	if err != nil {
-	    DestroyGeometry(allowed)
-	    return nil, err
-	}
-	mg, err := LoadUnionGeometryFromVector(b)
-	if err != nil {
-	    DestroyGeometry(allowed)
-	    return nil, err
-	}
-	inter := GeometryIntersection(allowed, mg)
-	DestroyGeometry(allowed)
-	DestroyGeometry(mg)
-	allowed = inter
-	if allowed == nil {
-	    allowed = C._empty_multi_polygon()
-	}
+    b, err := cfg.PolygonPath(name)
+    if err != nil {
+        DestroyGeometry(allowed)
+        return nil, err
+    }
+    mg, err := LoadUnionGeometryFromVector(b)
+    if err != nil {
+        DestroyGeometry(allowed)
+        return nil, err
+    }
+    inter := GeometryIntersection(allowed, mg)
+    DestroyGeometry(allowed)
+    DestroyGeometry(mg)
+    allowed = inter
+    if allowed == nil {
+        allowed = C._empty_multi_polygon()
+    }
     }
     // poligons-off: вычитание — результат не должен попадать в них.
     for _, name := range poligonsOff {
-	b, err := cfg.PolygonPath(name)
-	if err != nil {
-	    DestroyGeometry(allowed)
-	    return nil, err
-	}
-	mg, err := LoadUnionGeometryFromVector(b)
-	if err != nil {
-	    DestroyGeometry(allowed)
-	    return nil, err
-	}
-	diff := GeometryDifference(allowed, mg)
-	DestroyGeometry(allowed)
-	DestroyGeometry(mg)
-	allowed = diff
-	if allowed == nil {
-	    allowed = C._empty_multi_polygon()
-	}
+    b, err := cfg.PolygonPath(name)
+    if err != nil {
+        DestroyGeometry(allowed)
+        return nil, err
+    }
+    mg, err := LoadUnionGeometryFromVector(b)
+    if err != nil {
+        DestroyGeometry(allowed)
+        return nil, err
+    }
+    diff := GeometryDifference(allowed, mg)
+    DestroyGeometry(allowed)
+    DestroyGeometry(mg)
+    allowed = diff
+    if allowed == nil {
+        allowed = C._empty_multi_polygon()
+    }
     }
     return allowed, nil
 }
@@ -248,7 +248,7 @@ func BuildAllowedGeometry(cfg *AppConfig, searchPolygon string, poligonsOn []str
 func TileFootprintFromJP2(tile SafeTile, channels []string) (Geometry, error) {
     cube, err := ReadSentinelTileCube(tile, channels[:1], "none")
     if err != nil {
-	return nil, err
+    return nil, err
     }
     return RectFromGeo(cube.Geo, cube.W, cube.H), nil
 }
@@ -290,17 +290,17 @@ func RectFromGeo(geo [6]float64, w, h int) Geometry {
 func MergeShapefileIntoGeometry(shp string, allowedGeom Geometry, merged *Geometry) error {
     g, err := LoadUnionGeometryFromVector(shp)
     if err != nil {
-	return err
+    return err
     }
     defer DestroyGeometry(g)
     clip := GeometryIntersection(g, allowedGeom)
     if clip == nil {
-	return nil
+    return nil
     }
     defer DestroyGeometry(clip)
     u := GeometryUnion(*merged, clip)
     if *merged != nil {
-	DestroyGeometry(*merged)
+    DestroyGeometry(*merged)
     }
     *merged = u
     return nil
@@ -308,15 +308,15 @@ func MergeShapefileIntoGeometry(shp string, allowedGeom Geometry, merged *Geomet
 
 func GeometryCount(g Geometry) int {
     if g == nil {
-	return 0
+    return 0
     }
     t := C.OGR_G_GetGeometryType(g)
     flat := C.OGR_GT_Flatten(t)
     if flat == C.wkbPolygon {
-	return 1
+    return 1
     }
     if flat == C.wkbMultiPolygon || flat == C.wkbGeometryCollection {
-	return int(C.OGR_G_GetGeometryCount(g))
+    return int(C.OGR_G_GetGeometryCount(g))
     }
     return 1
 }
@@ -324,7 +324,7 @@ func GeometryCount(g Geometry) int {
 func CleanupShapefileSet(shp string) {
     base := shp[:len(shp)-len(filepath.Ext(shp))]
     for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
-	_ = os.Remove(base + ext)
+    _ = os.Remove(base + ext)
     }
 }
 
@@ -339,53 +339,43 @@ func createEmptyVector(path string, driverName string) error {
     initGeom()
     base := filepath.Join(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
     if driverName == "ESRI Shapefile" {
-	for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
-	    _ = os.Remove(base + ext)
-	}
+    for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
+        _ = os.Remove(base + ext)
+    }
     } else {
-	_ = os.Remove(path)
+    _ = os.Remove(path)
     }
     drvName := C.CString(driverName)
     defer C.free(unsafe.Pointer(drvName))
     drv := C.OGRGetDriverByName(drvName)
     if drv == nil {
-	return fmt.Errorf("OGR driver not found: %s", driverName)
+    return fmt.Errorf("OGR driver not found: %s", driverName)
     }
     cp := C.CString(path)
     defer C.free(unsafe.Pointer(cp))
     ds := C.OGR_Dr_CreateDataSource(drv, cp, nil)
     if ds == nil {
-	return fmt.Errorf("create vector: %s", path)
+    return fmt.Errorf("create vector: %s", path)
     }
     defer C.OGR_DS_Destroy(ds)
     layerName := C.CString("result")
     defer C.free(unsafe.Pointer(layerName))
     srs := newEPSG4326SRS()
     defer C.OSRDestroySpatialReference(srs)
-    layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbMultiPolygon, nil)
+    // wkbUnknown позволяет записывать любой тип геометрии (Polygon, MultiPolygon и т.д.)
+    // без ошибки OGR_F_SetGeometry. Использование wkbMultiPolygon здесь было ошибкой:
+    // GeometryIntersection возвращает wkbPolygon, и SetGeometry возвращало CE_Failure,
+    // из-за чего OGR_L_CreateFeature не вызывался — все полигоны терялись.
+    layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
     if layer == nil {
-	return fmt.Errorf("create layer: %s", path)
+    return fmt.Errorf("create layer: %s", path)
     }
     fdName := C.CString("DN")
     fd := C.OGR_Fld_Create(fdName, C.OFTInteger)
     C.free(unsafe.Pointer(fdName))
     if fd != nil {
-	C.OGR_L_CreateField(layer, fd, 1)
-	C.OGR_Fld_Destroy(fd)
-    }
-    fdDN := C.CString("DN")
-    defer C.free(unsafe.Pointer(fdDN))
-    dnField := C.OGR_Fld_Create(fdDN, C.OFTInteger)
-    if dnField != nil {
-	C.OGR_L_CreateField(layer, dnField, 1)
-	C.OGR_Fld_Destroy(dnField)
-    }
-    fdDN = C.CString("DN")
-    defer C.free(unsafe.Pointer(fdDN))
-    dnField = C.OGR_Fld_Create(fdDN, C.OFTInteger)
-    if dnField != nil {
-	C.OGR_L_CreateField(layer, dnField, 1)
-	C.OGR_Fld_Destroy(dnField)
+    C.OGR_L_CreateField(layer, fd, 1)
+    C.OGR_Fld_Destroy(fd)
     }
     C.OGR_DS_SyncToDisk(ds)
     return nil
@@ -399,12 +389,12 @@ func openLayerForAppend(path string) (C.GDALDatasetH, C.OGRLayerH, error) {
     defer C.free(unsafe.Pointer(cp))
     ds := C.GDALOpenEx(cp, C.GDAL_OF_VECTOR|C.GDAL_OF_UPDATE, nil, nil, nil)
     if ds == nil {
-	return nil, nil, fmt.Errorf("open vector for update: %s", path)
+    return nil, nil, fmt.Errorf("open vector for update: %s", path)
     }
     layer := C.GDALDatasetGetLayer(ds, 0)
     if layer == nil {
-	C.GDALClose(ds)
-	return nil, nil, fmt.Errorf("layer 0 not found: %s", path)
+    C.GDALClose(ds)
+    return nil, nil, fmt.Errorf("layer 0 not found: %s", path)
     }
     return ds, layer, nil
 }
@@ -415,21 +405,21 @@ func AppendShapefileFeaturesClipped(srcShp string, allowedGeom Geometry, dstShp 
     defer C.free(unsafe.Pointer(srcCP))
     srcDS := C.GDALOpenEx(srcCP, C.GDAL_OF_VECTOR, nil, nil, nil)
     if srcDS == nil {
-	return fmt.Errorf("open source vector: %s", srcShp)
+    return fmt.Errorf("open source vector: %s", srcShp)
     }
     defer C.GDALClose(srcDS)
     srcLayer := C.GDALDatasetGetLayer(srcDS, 0)
     if srcLayer == nil {
-	return fmt.Errorf("source layer not found: %s", srcShp)
+    return fmt.Errorf("source layer not found: %s", srcShp)
     }
     if _, err := os.Stat(dstShp); err != nil {
-	if err := CreateEmptyShapefile(dstShp); err != nil {
-	    return err
-	}
+    if err := CreateEmptyShapefile(dstShp); err != nil {
+        return err
+    }
     }
     dstDS, dstLayer, err := openLayerForAppend(dstShp)
     if err != nil {
-	return err
+    return err
     }
     defer C.GDALClose(dstDS)
     dstDefn := C.OGR_L_GetLayerDefn(dstLayer)
@@ -438,51 +428,51 @@ func AppendShapefileFeaturesClipped(srcShp string, allowedGeom Geometry, dstShp 
     var srcSRS C.OGRSpatialReferenceH
     lsrs := C.OGR_L_GetSpatialRef(srcLayer)
     if lsrs != nil {
-	srcSRS = C.OSRClone(lsrs)
-	C._set_traditional_gis_order(srcSRS)
-	defer C.OSRDestroySpatialReference(srcSRS)
+    srcSRS = C.OSRClone(lsrs)
+    C._set_traditional_gis_order(srcSRS)
+    defer C.OSRDestroySpatialReference(srcSRS)
     }
 
     srcDefn := C.OGR_L_GetLayerDefn(srcLayer)
     srcDNIdx := C.OGR_FD_GetFieldIndex(srcDefn, C.CString("DN"))
     C.OGR_L_ResetReading(srcLayer)
     for {
-	feat := C.OGR_L_GetNextFeature(srcLayer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom == nil {
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	wg, err := reprojectGeometryToWGS84(geom, srcSRS)
-	if err != nil || wg == nil {
-	    if wg != nil {
-		DestroyGeometry(wg)
-	    }
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	clip := GeometryIntersection(wg, allowedGeom)
+    feat := C.OGR_L_GetNextFeature(srcLayer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom == nil {
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    wg, err := reprojectGeometryToWGS84(geom, srcSRS)
+    if err != nil || wg == nil {
+        if wg != nil {
 	DestroyGeometry(wg)
-	if clip != nil && !GeometryIsEmpty(clip) {
-	    outFeat := C.OGR_F_Create(dstDefn)
-	    if outFeat != nil {
-		if C.OGR_F_SetGeometry(outFeat, clip) == 0 {
-		    if srcDNIdx >= 0 && dstDNIdx >= 0 {
-			dn := C.OGR_F_GetFieldAsInteger(feat, srcDNIdx)
-			C.OGR_F_SetFieldInteger(outFeat, dstDNIdx, dn)
-		    }
-		    C.OGR_L_CreateFeature(dstLayer, outFeat)
-		}
-		C.OGR_F_Destroy(outFeat)
+        }
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    clip := GeometryIntersection(wg, allowedGeom)
+    DestroyGeometry(wg)
+    if clip != nil && !GeometryIsEmpty(clip) {
+        outFeat := C.OGR_F_Create(dstDefn)
+        if outFeat != nil {
+	if C.OGR_F_SetGeometry(outFeat, clip) == 0 {
+	    if srcDNIdx >= 0 && dstDNIdx >= 0 {
+	    dn := C.OGR_F_GetFieldAsInteger(feat, srcDNIdx)
+	    C.OGR_F_SetFieldInteger(outFeat, dstDNIdx, dn)
 	    }
+	    C.OGR_L_CreateFeature(dstLayer, outFeat)
 	}
-	if clip != nil {
-	    DestroyGeometry(clip)
-	}
-	C.OGR_F_Destroy(feat)
+	C.OGR_F_Destroy(outFeat)
+        }
+    }
+    if clip != nil {
+        DestroyGeometry(clip)
+    }
+    C.OGR_F_Destroy(feat)
     }
     C.GDALFlushCache(dstDS)
     return nil
@@ -494,12 +484,12 @@ func CountFeaturesInVector(path string) (int, error) {
     defer C.free(unsafe.Pointer(cp))
     ds := C.GDALOpenEx(cp, C.GDAL_OF_VECTOR, nil, nil, nil)
     if ds == nil {
-	return 0, fmt.Errorf("open vector: %s", path)
+    return 0, fmt.Errorf("open vector: %s", path)
     }
     defer C.GDALClose(ds)
     layer := C.GDALDatasetGetLayer(ds, 0)
     if layer == nil {
-	return 0, fmt.Errorf("layer 0 not found: %s", path)
+    return 0, fmt.Errorf("layer 0 not found: %s", path)
     }
     return int(C.OGR_L_GetFeatureCount(layer, 1)), nil
 }
@@ -510,19 +500,19 @@ func ConvertShapefileToGeoJSON(srcShp string, outGeoJSON string) error {
     defer C.free(unsafe.Pointer(srcCP))
     srcDS := C.GDALOpenEx(srcCP, C.GDAL_OF_VECTOR, nil, nil, nil)
     if srcDS == nil {
-	return fmt.Errorf("open source vector: %s", srcShp)
+    return fmt.Errorf("open source vector: %s", srcShp)
     }
     defer C.GDALClose(srcDS)
     srcLayer := C.GDALDatasetGetLayer(srcDS, 0)
     if srcLayer == nil {
-	return fmt.Errorf("source layer not found: %s", srcShp)
+    return fmt.Errorf("source layer not found: %s", srcShp)
     }
     if err := CreateEmptyGeoJSON(outGeoJSON); err != nil {
-	return err
+    return err
     }
     dstDS, dstLayer, err := openLayerForAppend(outGeoJSON)
     if err != nil {
-	return err
+    return err
     }
     defer C.GDALClose(dstDS)
     dstDefn := C.OGR_L_GetLayerDefn(dstLayer)
@@ -532,41 +522,41 @@ func ConvertShapefileToGeoJSON(srcShp string, outGeoJSON string) error {
     dstDNIndex := C.OGR_FD_GetFieldIndex(dstDefn, fdDN)
     var srcSRS C.OGRSpatialReferenceH
     if lsrs := C.OGR_L_GetSpatialRef(srcLayer); lsrs != nil {
-	srcSRS = C.OSRClone(lsrs)
-	C._set_traditional_gis_order(srcSRS)
-	defer C.OSRDestroySpatialReference(srcSRS)
+    srcSRS = C.OSRClone(lsrs)
+    C._set_traditional_gis_order(srcSRS)
+    defer C.OSRDestroySpatialReference(srcSRS)
     }
     C.OGR_L_ResetReading(srcLayer)
     for {
-	feat := C.OGR_L_GetNextFeature(srcLayer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom == nil {
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	wg, err := reprojectGeometryToWGS84(geom, srcSRS)
-	if err != nil || wg == nil || GeometryIsEmpty(wg) {
-	    if wg != nil {
-		DestroyGeometry(wg)
-	    }
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	outFeat := C.OGR_F_Create(dstDefn)
-	if outFeat != nil {
-	    if C.OGR_F_SetGeometry(outFeat, wg) == 0 {
-		if srcDNIndex >= 0 && dstDNIndex >= 0 {
-		    C.OGR_F_SetFieldInteger(outFeat, dstDNIndex, C.OGR_F_GetFieldAsInteger(feat, srcDNIndex))
-		}
-		C.OGR_L_CreateFeature(dstLayer, outFeat)
-	    }
-	    C.OGR_F_Destroy(outFeat)
-	}
+    feat := C.OGR_L_GetNextFeature(srcLayer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom == nil {
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    wg, err := reprojectGeometryToWGS84(geom, srcSRS)
+    if err != nil || wg == nil || GeometryIsEmpty(wg) {
+        if wg != nil {
 	DestroyGeometry(wg)
-	C.OGR_F_Destroy(feat)
+        }
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    outFeat := C.OGR_F_Create(dstDefn)
+    if outFeat != nil {
+        if C.OGR_F_SetGeometry(outFeat, wg) == 0 {
+	if srcDNIndex >= 0 && dstDNIndex >= 0 {
+	    C.OGR_F_SetFieldInteger(outFeat, dstDNIndex, C.OGR_F_GetFieldAsInteger(feat, srcDNIndex))
+	}
+	C.OGR_L_CreateFeature(dstLayer, outFeat)
+        }
+        C.OGR_F_Destroy(outFeat)
+    }
+    DestroyGeometry(wg)
+    C.OGR_F_Destroy(feat)
     }
     C.GDALFlushCache(dstDS)
     return nil
@@ -578,13 +568,13 @@ func writeGeometryToVector(g Geometry, outPath, driverName string) error {
     defer C.free(unsafe.Pointer(cd))
     drv := C.OGRGetDriverByName(cd)
     if drv == nil {
-	return fmt.Errorf("driver not found: %s", driverName)
+    return fmt.Errorf("driver not found: %s", driverName)
     }
     cp := C.CString(outPath)
     defer C.free(unsafe.Pointer(cp))
     ds := C.OGR_Dr_CreateDataSource(drv, cp, nil)
     if ds == nil {
-	return fmt.Errorf("create vector: %s", outPath)
+    return fmt.Errorf("create vector: %s", outPath)
     }
     defer C.OGR_DS_Destroy(ds)
     layerName := C.CString("result")
@@ -593,18 +583,18 @@ func writeGeometryToVector(g Geometry, outPath, driverName string) error {
     defer C.OSRDestroySpatialReference(srs)
     layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbMultiPolygon, nil)
     if layer == nil {
-	return fmt.Errorf("create layer: %s", outPath)
+    return fmt.Errorf("create layer: %s", outPath)
     }
     feat := C.OGR_F_Create(C.OGR_L_GetLayerDefn(layer))
     if feat == nil {
-	return fmt.Errorf("create feature: %s", outPath)
+    return fmt.Errorf("create feature: %s", outPath)
     }
     defer C.OGR_F_Destroy(feat)
     if C.OGR_F_SetGeometry(feat, g) != 0 {
-	return fmt.Errorf("set geometry: %s", outPath)
+    return fmt.Errorf("set geometry: %s", outPath)
     }
     if C.OGR_L_CreateFeature(layer, feat) != 0 {
-	return fmt.Errorf("write feature: %s", outPath)
+    return fmt.Errorf("write feature: %s", outPath)
     }
     C.OGR_DS_SyncToDisk(ds)
     return nil
@@ -624,13 +614,13 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     defer C.free(unsafe.Pointer(srcCP))
     srcDS := C.GDALOpenEx(srcCP, C.GDAL_OF_VECTOR, nil, nil, nil)
     if srcDS == nil {
-	return fmt.Errorf("dissolve: open source: %s", srcShp)
+    return fmt.Errorf("dissolve: open source: %s", srcShp)
     }
     defer C.GDALClose(srcDS)
 
     srcLayer := C.GDALDatasetGetLayer(srcDS, 0)
     if srcLayer == nil {
-	return fmt.Errorf("dissolve: layer not found: %s", srcShp)
+    return fmt.Errorf("dissolve: layer not found: %s", srcShp)
     }
 
     // Собираем GeometryCollection по классу DN.
@@ -641,62 +631,62 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
 
     collByDN := map[int]C.OGRGeometryH{}
     defer func() {
-	for _, coll := range collByDN {
-	    if coll != nil {
-		C.OGR_G_DestroyGeometry(coll)
-	    }
-	}
+    for _, coll := range collByDN {
+        if coll != nil {
+	C.OGR_G_DestroyGeometry(coll)
+        }
+    }
     }()
 
     C.OGR_L_ResetReading(srcLayer)
     for {
-	feat := C.OGR_L_GetNextFeature(srcLayer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom == nil {
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	dn := 1
-	if dnIdx >= 0 {
-	    dn = int(C.OGR_F_GetFieldAsInteger(feat, dnIdx))
-	    if dn <= 0 {
-		dn = 1
-	    }
-	}
-	cloned := C.OGR_G_Clone(geom)
-	C.OGR_F_Destroy(feat)
-	if cloned == nil {
-	    continue
-	}
-	coll, ok := collByDN[dn]
-	if !ok {
-	    coll = C.OGR_G_CreateGeometry(C.wkbGeometryCollection)
-	    collByDN[dn] = coll
-	}
-	// AddGeometryDirectly передаёт владение — cloned не надо уничтожать
-	C.OGR_G_AddGeometryDirectly(coll, cloned)
+    feat := C.OGR_L_GetNextFeature(srcLayer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom == nil {
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    dn := 1
+    if dnIdx >= 0 {
+        dn = int(C.OGR_F_GetFieldAsInteger(feat, dnIdx))
+        if dn <= 0 {
+	dn = 1
+        }
+    }
+    cloned := C.OGR_G_Clone(geom)
+    C.OGR_F_Destroy(feat)
+    if cloned == nil {
+        continue
+    }
+    coll, ok := collByDN[dn]
+    if !ok {
+        coll = C.OGR_G_CreateGeometry(C.wkbGeometryCollection)
+        collByDN[dn] = coll
+    }
+    // AddGeometryDirectly передаёт владение — cloned не надо уничтожать
+    C.OGR_G_AddGeometryDirectly(coll, cloned)
     }
 
     // Удаляем существующий файл если есть.
     base := strings.TrimSuffix(dstShp, filepath.Ext(dstShp))
     for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
-	_ = os.Remove(base + ext)
+    _ = os.Remove(base + ext)
     }
 
     drvName := C.CString("ESRI Shapefile")
     defer C.free(unsafe.Pointer(drvName))
     drv := C.OGRGetDriverByName(drvName)
     if drv == nil {
-	return fmt.Errorf("dissolve: ESRI Shapefile driver not found")
+    return fmt.Errorf("dissolve: ESRI Shapefile driver not found")
     }
     dstCP := C.CString(dstShp)
     defer C.free(unsafe.Pointer(dstCP))
     dstDS := C.OGR_Dr_CreateDataSource(drv, dstCP, nil)
     if dstDS == nil {
-	return fmt.Errorf("dissolve: create dst: %s", dstShp)
+    return fmt.Errorf("dissolve: create dst: %s", dstShp)
     }
     defer C.OGR_DS_Destroy(dstDS)
 
@@ -704,59 +694,59 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     var srs C.OGRSpatialReferenceH
     lsrs := C.OGR_L_GetSpatialRef(srcLayer)
     if lsrs != nil {
-	srs = C.OSRClone(lsrs)
-	defer C.OSRDestroySpatialReference(srs)
+    srs = C.OSRClone(lsrs)
+    defer C.OSRDestroySpatialReference(srs)
     }
     layerName := C.CString("dissolved")
     defer C.free(unsafe.Pointer(layerName))
     dstLayer := C.OGR_DS_CreateLayer(dstDS, layerName, srs, C.wkbPolygon, nil)
     if dstLayer == nil {
-	return fmt.Errorf("dissolve: create layer: %s", dstShp)
+    return fmt.Errorf("dissolve: create layer: %s", dstShp)
     }
     dstDefn := C.OGR_L_GetLayerDefn(dstLayer)
     dstDNIdx := C.OGR_FD_GetFieldIndex(dstDefn, C.CString("DN"))
 
     writeGeom := func(g C.OGRGeometryH, dn int) {
-	if g == nil || C.OGR_G_IsEmpty(g) != 0 {
-	    return
-	}
-	writeOne := func(sub C.OGRGeometryH) {
-	    f := C.OGR_F_Create(dstDefn)
-	    if f == nil {
-		return
-	    }
-	    C.OGR_F_SetGeometry(f, sub)
-	    if dstDNIdx >= 0 {
-		C.OGR_F_SetFieldInteger(f, dstDNIdx, C.int(dn))
-	    }
-	    C.OGR_L_CreateFeature(dstLayer, f)
-	    C.OGR_F_Destroy(f)
-	}
-	geomType := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(g))
-	if geomType == C.wkbMultiPolygon || geomType == C.wkbGeometryCollection {
-	    n := int(C.OGR_G_GetGeometryCount(g))
-	    for i := 0; i < n; i++ {
-		sub := C.OGR_G_GetGeometryRef(g, C.int(i))
-		writeOne(sub)
-	    }
-	} else {
-	    writeOne(g)
-	}
+    if g == nil || C.OGR_G_IsEmpty(g) != 0 {
+        return
+    }
+    writeOne := func(sub C.OGRGeometryH) {
+        f := C.OGR_F_Create(dstDefn)
+        if f == nil {
+	return
+        }
+        C.OGR_F_SetGeometry(f, sub)
+        if dstDNIdx >= 0 {
+	C.OGR_F_SetFieldInteger(f, dstDNIdx, C.int(dn))
+        }
+        C.OGR_L_CreateFeature(dstLayer, f)
+        C.OGR_F_Destroy(f)
+    }
+    geomType := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(g))
+    if geomType == C.wkbMultiPolygon || geomType == C.wkbGeometryCollection {
+        n := int(C.OGR_G_GetGeometryCount(g))
+        for i := 0; i < n; i++ {
+	sub := C.OGR_G_GetGeometryRef(g, C.int(i))
+	writeOne(sub)
+        }
+    } else {
+        writeOne(g)
+    }
     }
 
     for dn, coll := range collByDN {
-	// OGR_G_UnionCascaded вызывает GEOSUnaryUnion — быстрый алгоритм
-	// слияния произвольного набора геометрий за одну операцию.
-	// Результат заменяет coll; оригинальная коллекция уничтожается ниже.
-	merged := C.OGR_G_UnionCascaded(coll)
-	// Уничтожаем исходную коллекцию — merged уже независим
-	C.OGR_G_DestroyGeometry(coll)
-	collByDN[dn] = nil // предотвращаем двойной free в defer
-	if merged == nil {
-	    continue
-	}
-	writeGeom(merged, dn)
-	C.OGR_G_DestroyGeometry(merged)
+    // OGR_G_UnionCascaded вызывает GEOSUnaryUnion — быстрый алгоритм
+    // слияния произвольного набора геометрий за одну операцию.
+    // Результат заменяет coll; оригинальная коллекция уничтожается ниже.
+    merged := C.OGR_G_UnionCascaded(coll)
+    // Уничтожаем исходную коллекцию — merged уже независим
+    C.OGR_G_DestroyGeometry(coll)
+    collByDN[dn] = nil // предотвращаем двойной free в defer
+    if merged == nil {
+        continue
+    }
+    writeGeom(merged, dn)
+    C.OGR_G_DestroyGeometry(merged)
     }
 
     C.OGR_DS_SyncToDisk(dstDS)
@@ -773,7 +763,7 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     defer C.free(unsafe.Pointer(newCP))
     newDS := C.GDALOpenEx(newCP, C.GDAL_OF_VECTOR, nil, nil, nil)
     if newDS == nil {
-	return "", fmt.Errorf("open new shp: %s", newShp)
+    return "", fmt.Errorf("open new shp: %s", newShp)
     }
     defer C.GDALClose(newDS)
     newLayer := C.GDALDatasetGetLayer(newDS, 0)
@@ -782,7 +772,7 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     defer C.free(unsafe.Pointer(baseCP))
     baseDS := C.GDALOpenEx(baseCP, C.GDAL_OF_VECTOR, nil, nil, nil)
     if baseDS == nil {
-	return "", fmt.Errorf("open base shp: %s", baseShp)
+    return "", fmt.Errorf("open base shp: %s", baseShp)
     }
     defer C.GDALClose(baseDS)
     baseLayer := C.GDALDatasetGetLayer(baseDS, 0)
@@ -791,20 +781,20 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     var baseGeoms []C.OGRGeometryH
     C.OGR_L_ResetReading(baseLayer)
     for {
-	feat := C.OGR_L_GetNextFeature(baseLayer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom != nil {
-	    baseGeoms = append(baseGeoms, C.OGR_G_Clone(geom))
-	}
-	C.OGR_F_Destroy(feat)
+    feat := C.OGR_L_GetNextFeature(baseLayer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom != nil {
+        baseGeoms = append(baseGeoms, C.OGR_G_Clone(geom))
+    }
+    C.OGR_F_Destroy(feat)
     }
     defer func() {
-	for _, g := range baseGeoms {
-	    C.OGR_G_DestroyGeometry(g)
-	}
+    for _, g := range baseGeoms {
+        C.OGR_G_DestroyGeometry(g)
+    }
     }()
 
     // Создаём выходной шейпфайл с той же SRS что у входного (UTM тайла).
@@ -812,10 +802,10 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     // clip по AOI будет пустым. Берём SRS из newLayer.
     outShp := strings.TrimSuffix(newShp, ".shp") + "_diff.shp"
     {
-	base := strings.TrimSuffix(outShp, ".shp")
-	for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
-	    _ = os.Remove(base + ext)
-	}
+    base := strings.TrimSuffix(outShp, ".shp")
+    for _, ext := range []string{".shp", ".shx", ".dbf", ".prj", ".cpg"} {
+        _ = os.Remove(base + ext)
+    }
     }
     drvNameC := C.CString("ESRI Shapefile")
     defer C.free(unsafe.Pointer(drvNameC))
@@ -824,7 +814,7 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     defer C.free(unsafe.Pointer(outShpC))
     outRawDS := C.OGR_Dr_CreateDataSource(outDrv, outShpC, nil)
     if outRawDS == nil {
-	return "", fmt.Errorf("create out shp: %s", outShp)
+    return "", fmt.Errorf("create out shp: %s", outShp)
     }
     outLayerNameC := C.CString("result")
     defer C.free(unsafe.Pointer(outLayerNameC))
@@ -832,8 +822,8 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     newSRS := C.OGR_L_GetSpatialRef(newLayer)
     outRawLayer := C.OGR_DS_CreateLayer(outRawDS, outLayerNameC, newSRS, C.wkbMultiPolygon, nil)
     if outRawLayer == nil {
-	C.OGR_DS_Destroy(outRawDS)
-	return "", fmt.Errorf("create out layer")
+    C.OGR_DS_Destroy(outRawDS)
+    return "", fmt.Errorf("create out layer")
     }
     outDefn := C.OGR_L_GetLayerDefn(outRawLayer)
 
@@ -842,44 +832,44 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
     // OGR_G_Difference вызывается только при реальном пересечении.
     C.OGR_L_ResetReading(newLayer)
     for {
-	feat := C.OGR_L_GetNextFeature(newLayer)
-	if feat == nil {
-	    break
-	}
-	geom := C.OGR_F_GetGeometryRef(feat)
-	if geom == nil {
-	    C.OGR_F_Destroy(feat)
-	    continue
-	}
-	result := C.OGR_G_Clone(geom)
-	C.OGR_F_Destroy(feat)
-	for _, bg := range baseGeoms {
-	    if result == nil {
-		break
-	    }
-	    if C.OGR_G_Intersects(result, bg) == 0 {
-		continue
-	    }
-	    diff := C.OGR_G_Difference(result, bg)
-	    C.OGR_G_DestroyGeometry(result)
-	    result = diff
-	}
-	if result == nil {
-	    continue
-	}
-	area := float64(C.OGR_G_Area(result))
-	if minArea > 0 && area < minArea {
-	    C.OGR_G_DestroyGeometry(result)
-	    continue
-	}
-	outFeat := C.OGR_F_Create(outDefn)
-	if outFeat != nil {
-	    C.OGR_F_SetGeometryDirectly(outFeat, result)
-	    C.OGR_L_CreateFeature(outRawLayer, outFeat)
-	    C.OGR_F_Destroy(outFeat)
-	} else {
-	    C.OGR_G_DestroyGeometry(result)
-	}
+    feat := C.OGR_L_GetNextFeature(newLayer)
+    if feat == nil {
+        break
+    }
+    geom := C.OGR_F_GetGeometryRef(feat)
+    if geom == nil {
+        C.OGR_F_Destroy(feat)
+        continue
+    }
+    result := C.OGR_G_Clone(geom)
+    C.OGR_F_Destroy(feat)
+    for _, bg := range baseGeoms {
+        if result == nil {
+	break
+        }
+        if C.OGR_G_Intersects(result, bg) == 0 {
+	continue
+        }
+        diff := C.OGR_G_Difference(result, bg)
+        C.OGR_G_DestroyGeometry(result)
+        result = diff
+    }
+    if result == nil {
+        continue
+    }
+    area := float64(C.OGR_G_Area(result))
+    if minArea > 0 && area < minArea {
+        C.OGR_G_DestroyGeometry(result)
+        continue
+    }
+    outFeat := C.OGR_F_Create(outDefn)
+    if outFeat != nil {
+        C.OGR_F_SetGeometryDirectly(outFeat, result)
+        C.OGR_L_CreateFeature(outRawLayer, outFeat)
+        C.OGR_F_Destroy(outFeat)
+    } else {
+        C.OGR_G_DestroyGeometry(result)
+    }
     }
     C.OGR_DS_SyncToDisk(outRawDS)
     C.OGR_DS_Destroy(outRawDS)
@@ -889,18 +879,18 @@ func ShapefileDifference(newShp, baseShp string, minArea float64) (string, error
 // CountShapefileFeatures возвращает число features в shapefile (для диагностики).
 func CountShapefileFeatures(shp string) int {
     if shp == "" {
-	return 0
+    return 0
     }
     cp := C.CString(shp)
     defer C.free(unsafe.Pointer(cp))
     ds := C.GDALOpenEx(cp, C.GDAL_OF_VECTOR, nil, nil, nil)
     if ds == nil {
-	return 0
+    return 0
     }
     defer C.GDALClose(ds)
     lyr := C.GDALDatasetGetLayer(ds, 0)
     if lyr == nil {
-	return 0
+    return 0
     }
     return int(C.OGR_L_GetFeatureCount(lyr, 1))
 }
