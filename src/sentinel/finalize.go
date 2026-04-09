@@ -10,7 +10,8 @@ package main
 //   - Inputs по умолчанию 1
 //   - NumClasses по умолчанию 1 (бинарная модель)
 //   - Divisor по умолчанию 10000
-//   - Merge берётся напрямую из config.json: true включает dissolve, false (и отсутствие поля) — нет
+//   - Merge берётся напрямую из config.json: true включает dissolve,
+//     false (и отсутствие поля) — dissolve не запускается
 func FinalizeSpec(m ModelSpec) ModelSpec {
     if m.ONNXFile == "" && m.Name != "" {
 	m.ONNXFile = m.Name + ".onnx"

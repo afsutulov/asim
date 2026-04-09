@@ -362,11 +362,11 @@ func createEmptyVector(path string, driverName string) error {
     defer C.free(unsafe.Pointer(layerName))
     srs := newEPSG4326SRS()
     defer C.OSRDestroySpatialReference(srs)
-    // wkbUnknown позволяет записывать любой тип геометрии (Polygon, MultiPolygon и т.д.)
-    // без ошибки OGR_F_SetGeometry. Использование wkbMultiPolygon здесь было ошибкой:
-    // GeometryIntersection возвращает wkbPolygon, и SetGeometry возвращало CE_Failure,
-    // из-за чего OGR_L_CreateFeature не вызывался — все полигоны терялись.
-    layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
+    // Используем wkbMultiPolygon: все геометрии нормализуются до MultiPolygon
+    // через toMultiPolygon() перед записью, поэтому тип всегда совпадает.
+    // wkbUnknown нельзя использовать в Shapefile — GDAL записывает shapeType=0 (Null),
+    // и при чтении все геометрии возвращаются как NULL → данные теряются.
+    layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbMultiPolygon, nil)
     if layer == nil {
     return fmt.Errorf("create layer: %s", path)
     }
@@ -397,6 +397,45 @@ func openLayerForAppend(path string) (C.GDALDatasetH, C.OGRLayerH, error) {
     return nil, nil, fmt.Errorf("layer 0 not found: %s", path)
     }
     return ds, layer, nil
+}
+
+
+// toMultiPolygon нормализует любую геометрию к типу MultiPolygon.
+// Если g уже MultiPolygon — возвращает g без изменений (владение не передаётся).
+// Если g является Polygon — создаёт новый MultiPolygon и добавляет клон g.
+// Если g является GeometryCollection — собирает все полигоны внутри в один MultiPolygon.
+// Во всех остальных случаях возвращает g как есть.
+// Вызывающий код обязан уничтожить возвращённую геометрию если она != g.
+func toMultiPolygon(g C.OGRGeometryH) C.OGRGeometryH {
+    if g == nil {
+    return nil
+    }
+    flat := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(g))
+    if flat == C.wkbMultiPolygon {
+    return g // уже нужный тип
+    }
+    mp := C.OGR_G_CreateGeometry(C.wkbMultiPolygon)
+    if flat == C.wkbPolygon {
+    C.OGR_G_AddGeometry(mp, g) // AddGeometry копирует
+    return mp
+    }
+    if flat == C.wkbGeometryCollection || flat == C.wkbMultiPolygon {
+    n := int(C.OGR_G_GetGeometryCount(g))
+    for i := 0; i < n; i++ {
+        sub := C.OGR_G_GetGeometryRef(g, C.int(i))
+        subFlat := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(sub))
+        if subFlat == C.wkbPolygon {
+	C.OGR_G_AddGeometry(mp, sub)
+        }
+    }
+    if C.OGR_G_GetGeometryCount(mp) > 0 {
+        return mp
+    }
+    C.OGR_G_DestroyGeometry(mp)
+    return g
+    }
+    C.OGR_G_DestroyGeometry(mp)
+    return g
 }
 
 func AppendShapefileFeaturesClipped(srcShp string, allowedGeom Geometry, dstShp string) error {
@@ -457,6 +496,14 @@ func AppendShapefileFeaturesClipped(srcShp string, allowedGeom Geometry, dstShp 
     clip := GeometryIntersection(wg, allowedGeom)
     DestroyGeometry(wg)
     if clip != nil && !GeometryIsEmpty(clip) {
+        // Нормализуем геометрию до MultiPolygon: одиночный Polygon оборачиваем,
+        // GeometryCollection конвертируем. Это гарантирует единый тип в выходном
+        // файле, что важно для корректного отображения в ГИС-системах (заливка).
+        normalized := toMultiPolygon(clip)
+        if normalized != clip {
+	DestroyGeometry(clip)
+	clip = normalized
+        }
         outFeat := C.OGR_F_Create(dstDefn)
         if outFeat != nil {
 	if C.OGR_F_SetGeometry(outFeat, clip) == 0 {
@@ -604,9 +651,10 @@ func writeGeometryToVector(g Geometry, outPath, driverName string) error {
 // перекрывающиеся (union), и записывает результат в dstShp.
 // Это устраняет дублирование полигонов на стыках Sentinel-сцен.
 //
-// Алгоритм: собираем все геометрии в GeometryCollection по классу DN,
+// Алгоритм: собираем все подполигоны в MultiPolygon по классу DN,
 // затем вызываем OGR_G_UnionCascaded (= GEOSUnaryUnion) — одну операцию
 // вместо N инкрементальных. Это на порядки быстрее при N > 1000 полигонов.
+// Важно: OGR_G_UnionCascaded принимает строго wkbMultiPolygon.
 func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     initGeom()
 
@@ -623,9 +671,11 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     return fmt.Errorf("dissolve: layer not found: %s", srcShp)
     }
 
-    // Собираем GeometryCollection по классу DN.
-    // OGR_G_UnionCascaded принимает GeometryCollection и выполняет
-    // GEOSUnaryUnion за одну операцию — O(N log N) вместо O(N²).
+    // Собираем все полигоны в MultiPolygon по классу DN.
+    // OGR_G_UnionCascaded требует строго wkbMultiPolygon (не GeometryCollection) —
+    // иначе GEOS выбрасывает "Invalid argument (must be a MultiPolygon)".
+    // Все входящие геометрии (Polygon / MultiPolygon) раскладываем в плоский
+    // список подполигонов и добавляем в MultiPolygon через OGR_G_AddGeometry (копирует).
     srcDefn := C.OGR_L_GetLayerDefn(srcLayer)
     dnIdx := C.OGR_FD_GetFieldIndex(srcDefn, C.CString("DN"))
 
@@ -637,6 +687,28 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
         }
     }
     }()
+
+    // addPolyToMulti добавляет все подполигоны из g в mp (OGR_G_AddGeometry копирует).
+    addPolyToMulti := func(mp, g C.OGRGeometryH) {
+    if g == nil {
+        return
+    }
+    flat := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(g))
+    if flat == C.wkbPolygon {
+        C.OGR_G_AddGeometry(mp, g)
+        return
+    }
+    if flat == C.wkbMultiPolygon || flat == C.wkbGeometryCollection {
+        n := int(C.OGR_G_GetGeometryCount(g))
+        for i := 0; i < n; i++ {
+	sub := C.OGR_G_GetGeometryRef(g, C.int(i))
+	subFlat := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(sub))
+	if subFlat == C.wkbPolygon {
+	    C.OGR_G_AddGeometry(mp, sub)
+	}
+        }
+    }
+    }
 
     C.OGR_L_ResetReading(srcLayer)
     for {
@@ -656,18 +728,12 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
 	dn = 1
         }
     }
-    cloned := C.OGR_G_Clone(geom)
+    if _, ok := collByDN[dn]; !ok {
+        collByDN[dn] = C.OGR_G_CreateGeometry(C.wkbMultiPolygon)
+    }
+    // OGR_G_AddGeometry копирует геометрию — geom остаётся во владении feat
+    addPolyToMulti(collByDN[dn], geom)
     C.OGR_F_Destroy(feat)
-    if cloned == nil {
-        continue
-    }
-    coll, ok := collByDN[dn]
-    if !ok {
-        coll = C.OGR_G_CreateGeometry(C.wkbGeometryCollection)
-        collByDN[dn] = coll
-    }
-    // AddGeometryDirectly передаёт владение — cloned не надо уничтожать
-    C.OGR_G_AddGeometryDirectly(coll, cloned)
     }
 
     // Удаляем существующий файл если есть.
@@ -699,9 +765,17 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     }
     layerName := C.CString("dissolved")
     defer C.free(unsafe.Pointer(layerName))
-    dstLayer := C.OGR_DS_CreateLayer(dstDS, layerName, srs, C.wkbPolygon, nil)
+    dstLayer := C.OGR_DS_CreateLayer(dstDS, layerName, srs, C.wkbMultiPolygon, nil)
     if dstLayer == nil {
     return fmt.Errorf("dissolve: create layer: %s", dstShp)
+    }
+    // Добавляем поле DN для сохранения класса (важно для многоклассовых моделей).
+    dstDNFieldName := C.CString("DN")
+    dstDNFieldDef := C.OGR_Fld_Create(dstDNFieldName, C.OFTInteger)
+    C.free(unsafe.Pointer(dstDNFieldName))
+    if dstDNFieldDef != nil {
+    C.OGR_L_CreateField(dstLayer, dstDNFieldDef, 1)
+    C.OGR_Fld_Destroy(dstDNFieldDef)
     }
     dstDefn := C.OGR_L_GetLayerDefn(dstLayer)
     dstDNIdx := C.OGR_FD_GetFieldIndex(dstDefn, C.CString("DN"))
@@ -710,27 +784,21 @@ func DissolveOverlappingPolygons(srcShp, dstShp string) error {
     if g == nil || C.OGR_G_IsEmpty(g) != 0 {
         return
     }
-    writeOne := func(sub C.OGRGeometryH) {
-        f := C.OGR_F_Create(dstDefn)
-        if f == nil {
-	return
-        }
-        C.OGR_F_SetGeometry(f, sub)
+    // Нормализуем до MultiPolygon и пишем одной фичей.
+    // Это гарантирует что все результаты в итоговом шейпфайле имеют
+    // единый тип MultiPolygon — ГИС-системы отображают их с заливкой.
+    mp := toMultiPolygon(g)
+    f := C.OGR_F_Create(dstDefn)
+    if f != nil {
+        C.OGR_F_SetGeometry(f, mp)
         if dstDNIdx >= 0 {
 	C.OGR_F_SetFieldInteger(f, dstDNIdx, C.int(dn))
         }
         C.OGR_L_CreateFeature(dstLayer, f)
         C.OGR_F_Destroy(f)
     }
-    geomType := C.OGR_GT_Flatten(C.OGR_G_GetGeometryType(g))
-    if geomType == C.wkbMultiPolygon || geomType == C.wkbGeometryCollection {
-        n := int(C.OGR_G_GetGeometryCount(g))
-        for i := 0; i < n; i++ {
-	sub := C.OGR_G_GetGeometryRef(g, C.int(i))
-	writeOne(sub)
-        }
-    } else {
-        writeOne(g)
+    if mp != g {
+        C.OGR_G_DestroyGeometry(mp)
     }
     }
 

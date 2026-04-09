@@ -11,7 +11,7 @@ import (
 
 func printUsage(configPath string) {
 	fmt.Fprintln(os.Stderr, "ГБУ ПК \"Центр информационного развития Пермского края\". 2026 год")
-	fmt.Fprintln(os.Stderr, "Модуль поиска объектов по спутниковым снимкам Sentinel2 L1C\n")
+	fmt.Fprintln(os.Stderr, "Модуль поиска объектов по спутниковым снимкам Sentinel2 (L1C и L2A)\n")
 	fmt.Fprintf(os.Stderr, "Пример: ./sentinel --config %s --model hogweed --start 2025-06-11 --end 2025-06-20 --out run1\n", configPath)
 	fmt.Fprintln(os.Stderr, "Для моделей с inputs=2 дополнительно задаются --start2 и --end2")
 }
